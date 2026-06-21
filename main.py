@@ -21,6 +21,16 @@ client = OpenAI(
 
 MODEL = "gpt-4.1-mini"
 
+
+PROXY_URL = (
+    os.getenv("HTTPS_PROXY")
+    or os.getenv("HTTP_PROXY")
+)
+
+if PROXY_URL:
+    print("PROXY ENABLED")
+else:
+    print("NO PROXY")
 # =========================
 # CACHE
 # =========================
@@ -123,9 +133,13 @@ def fetch_with_ytdlp_subtitles(video_id: str):
                 "%(id)s.%(ext)s"
             ),
             "quiet": True,
-            "ignoreerrors": True,
-            "cookiesfrombrowser": ("safari",)
+            "ignoreerrors": True
+            # "cookiesfrombrowser": ("safari",)
         }
+        if PROXY_URL:
+            ydl_opts["proxy"] = PROXY_URL
+
+
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(url, download=True)
@@ -332,9 +346,13 @@ def fetch_with_whisper(video_id: str):
             "format": "bestaudio/best",
             "outtmpl": audio_path,
             "quiet": True,
-            "ignoreerrors": True,
-            "cookiesfrombrowser": ("safari",)
+            "ignoreerrors": True
+            # "cookiesfrombrowser": ("safari",)
         }
+
+
+        if PROXY_URL:
+            ydl_opts["proxy"] = PROXY_URL
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(url, download=True)
