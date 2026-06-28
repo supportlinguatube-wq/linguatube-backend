@@ -113,19 +113,59 @@ def fetch_with_ytdlp_subtitles(video_id: str):
         url = f"https://www.youtube.com/watch?v={video_id}"
 
         temp_dir = tempfile.mkdtemp()
+        
+        available_langs = []
+
+        try:
+            api = YouTubeTranscriptApi()
+            transcript_list = api.list(video_id)
+
+            available_langs = [
+                t.language_code
+                for t in transcript_list
+            ]
+
+        except Exception:
+            pass
+
+        preferred_order = [
+            "en",
+            "ru",
+            "ar",
+            "zh",
+            "ko",
+            "ja"
+        ]
+
+        lang = next(
+            (
+                l for l in preferred_order
+                if any(
+                    code.startswith(l)
+                    for code in available_langs
+                )
+            ),
+            None
+        )
+
+        subtitle_langs = [lang] if lang else ["en"]
+
+        print("AVAILABLE LANGS:", available_langs)
+        print("SELECTED LANG:", subtitle_langs)
 
         ydl_opts = {
             "skip_download": True,
             "writesubtitles": True,
             "writeautomaticsub": True,
-            "subtitleslangs": [
-                "en", "en.*",
-                "ru", "ru.*",
-                "ar", "ar.*",
-                "zh", "zh.*",
-                "ko", "ko.*",
-                "ja", "ja.*"
-            ],
+            # "subtitleslangs": [
+            #     "en", "en.*",
+            #     "ru", "ru.*",
+            #     "ar", "ar.*",
+            #     "zh", "zh.*",
+            #     "ko", "ko.*",
+            #     "ja", "ja.*"
+            # ],
+            "subtitleslangs": subtitle_langs,
             "subtitlesformat": "json3",
             "outtmpl": os.path.join(
                 temp_dir,
