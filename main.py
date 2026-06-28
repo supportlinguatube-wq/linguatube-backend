@@ -79,19 +79,21 @@ def fetch_transcript(video_id: str):
     if video_id in TRANSCRIPT_CACHE:
         return TRANSCRIPT_CACHE[video_id]
 
-    # 1) FIRST: yt-dlp subtitles
+    # 1) FIRST: youtube-transcript-api
+    items = fetch_with_youtube_transcript_api(video_id)
+
+    if items:
+        TRANSCRIPT_CACHE[video_id] = items
+        return items
+
+    # 2) SECOND: yt-dlp fallback
     items = fetch_with_ytdlp_subtitles(video_id)
 
     if items:
         TRANSCRIPT_CACHE[video_id] = items
         return items
 
-    # 2) SECOND: youtube-transcript-api fallback
-    items = fetch_with_youtube_transcript_api(video_id)
-
-    if items:
-        TRANSCRIPT_CACHE[video_id] = items
-        return items
+    
 
     # # 3) THIRD: audio -> OpenAI transcription
     # items = fetch_with_whisper(video_id)
