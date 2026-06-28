@@ -22,10 +22,7 @@ client = OpenAI(
 MODEL = "gpt-4.1-mini"
 
 
-PROXY_URL = (
-    os.getenv("HTTPS_PROXY")
-    or os.getenv("HTTP_PROXY")
-)
+PROXY_URL = os.getenv("YTDLP_PROXY")
 
 if PROXY_URL:
     print("PROXY ENABLED")
@@ -347,7 +344,6 @@ def fetch_with_whisper(video_id: str):
             "outtmpl": audio_path,
             "quiet": True,
             "ignoreerrors": True
-            # "cookiesfrombrowser": ("safari",)
         }
 
 
