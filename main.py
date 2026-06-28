@@ -93,12 +93,12 @@ def fetch_transcript(video_id: str):
         TRANSCRIPT_CACHE[video_id] = items
         return items
 
-    # 3) THIRD: audio -> OpenAI transcription
-    items = fetch_with_whisper(video_id)
+    # # 3) THIRD: audio -> OpenAI transcription
+    # items = fetch_with_whisper(video_id)
 
-    if items:
-        TRANSCRIPT_CACHE[video_id] = items
-        return items
+    # if items:
+    #     TRANSCRIPT_CACHE[video_id] = items
+    #     return items
 
     return []
 # =========================
