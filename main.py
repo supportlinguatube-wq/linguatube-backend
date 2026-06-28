@@ -536,47 +536,47 @@ def get_transcript(
     return translate_batch(prepared)
 
 
-# @app.get("/video-url/{video_id}")
-# def get_video_url(video_id: str):
-#     try:
-#         import yt_dlp
+@app.get("/video-url/{video_id}")
+def get_video_url(video_id: str):
+    try:
+        import yt_dlp
 
-#         url = f"https://www.youtube.com/watch?v={video_id}"
+        url = f"https://www.youtube.com/watch?v={video_id}"
 
-#         ydl_opts = {
-#             "format": "best[ext=mp4]/best",
-#             "quiet": True,
-#             "ignoreerrors": True,
-#         }
+        ydl_opts = {
+            "format": "best[ext=mp4]/best",
+            "quiet": True,
+            "ignoreerrors": True,
+        }
 
-#         if PROXY_URL:
-#             ydl_opts["proxy"] = PROXY_URL
+        if PROXY_URL:
+            ydl_opts["proxy"] = PROXY_URL
 
-#         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-#             info = ydl.extract_info(url, download=False)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
 
-#         if not info:
-#             return {
-#                 "video_url": "",
-#                 "title": "",
-#                 "thumbnail": ""
-#             }
+        if not info:
+            return {
+                "video_url": "",
+                "title": "",
+                "thumbnail": ""
+            }
 
-#         return {
-#             "video_url": info.get("url", ""),
-#             "title": info.get("title", ""),
-#             "thumbnail": info.get("thumbnail", "")
-#         }
+        return {
+            "video_url": info.get("url", ""),
+            "title": info.get("title", ""),
+            "thumbnail": info.get("thumbnail", "")
+        }
 
-#     except Exception as error:
-#         print("VIDEO URL ERROR:", error)
+    except Exception as error:
+        print("VIDEO URL ERROR:", error)
 
-#         return {
-#             "video_url": "",
-#             "title": "",
-#             "thumbnail": ""
-#         }
-# =========================
+        return {
+            "video_url": "",
+            "title": "",
+            "thumbnail": ""
+        }
+    
 # WORD TRANSLATION
 # =========================
 
