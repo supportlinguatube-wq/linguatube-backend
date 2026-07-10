@@ -3,6 +3,16 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from openai import OpenAI
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
+from cache import (
+    get_cache,
+    set_cache,
+    TRANSCRIPT_TTL,
+    TRANSLATION_TTL,
+    VIDEO_URL_TTL,
+    WORD_TTL
+)
+
+
 
 import os
 import json
@@ -76,7 +86,16 @@ def clean_text(text: str) -> str:
 
 def fetch_transcript(video_id: str):
 
+    cache_key = f"transcript:{video_id}"
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        print("TRANSCRIPT FROM REDIS")
+        return cached
+
     if video_id in TRANSCRIPT_CACHE:
+        print("TRANSCRIPT FROM MEMORY")
         return TRANSCRIPT_CACHE[video_id]
 
     # 1) FIRST: youtube-transcript-api
@@ -84,6 +103,13 @@ def fetch_transcript(video_id: str):
 
     if items:
         TRANSCRIPT_CACHE[video_id] = items
+
+        set_cache(
+           f"transcript:{video_id}",
+           items,
+           TRANSCRIPT_TTL
+)
+
         return items
 
     # 2) SECOND: yt-dlp fallback
@@ -91,6 +117,13 @@ def fetch_transcript(video_id: str):
 
     if items:
         TRANSCRIPT_CACHE[video_id] = items
+
+        set_cache(
+            f"transcript:{video_id}",
+            items,
+            TRANSCRIPT_TTL
+)
+
         return items
 
     
@@ -157,14 +190,6 @@ def fetch_with_ytdlp_subtitles(video_id: str):
             "skip_download": True,
             "writesubtitles": True,
             "writeautomaticsub": True,
-            # "subtitleslangs": [
-            #     "en", "en.*",
-            #     "ru", "ru.*",
-            #     "ar", "ar.*",
-            #     "zh", "zh.*",
-            #     "ko", "ko.*",
-            #     "ja", "ja.*"
-            # ],
             "subtitleslangs": subtitle_langs,
             "subtitlesformat": "json3",
             "outtmpl": os.path.join(
@@ -584,6 +609,16 @@ def get_video_url(video_id: str):
         import yt_dlp
 
         url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        cache_key = f"video:{video_id}"
+
+        cached = get_cache(cache_key)
+
+        if cached is not None:
+             print("VIDEO URL FROM REDIS")
+             return cached
+
+
 
         ydl_opts = {
             "format": "best[ext=mp4]/best",
@@ -613,11 +648,19 @@ def get_video_url(video_id: str):
     except Exception as error:
         print("VIDEO URL ERROR:", error)
 
-        return {
-            "video_url": "",
-            "title": "",
-            "thumbnail": ""
-        }
+        result = {
+            "video_url": info.get("url", ""),
+            "title": info.get("title", ""),
+            "thumbnail": info.get("thumbnail", "")
+}
+
+        set_cache(
+            cache_key,
+            result,
+            VIDEO_URL_TTL
+)
+
+        return result
     
 # WORD TRANSLATION
 # =========================
@@ -628,6 +671,15 @@ def translate_word(
 ):
 
     word = clean_text(word)
+    cache_key = f"word:{word.lower()}"
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        print("WORD FROM REDIS")
+        return cached
+
+
 
     if not word:
 
@@ -665,10 +717,18 @@ def translate_word(
         .strip()
     )
 
-    return {
+    result = {
 
         "word": word,
 
         "translated":
-            clean_text(translated)
-    }
+             clean_text(translated)
+}
+
+    set_cache(
+        cache_key,
+        result,
+        WORD_TTL
+)
+
+    return result

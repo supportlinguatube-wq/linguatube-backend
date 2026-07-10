@@ -7,3 +7,4 @@ ftfy
 yt-dlp
 deep-translator
 requests
+redis[hiredis]
