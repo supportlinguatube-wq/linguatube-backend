@@ -20,6 +20,7 @@ import re
 import ftfy
 import subprocess
 import tempfile
+import asyncio
 
 load_dotenv()
 
@@ -79,6 +80,46 @@ def clean_text(text: str) -> str:
         return ""
 
     return ftfy.fix_text(text).strip()
+
+
+
+@app.get("/process/{video_id}")
+async def process_video(
+    video_id: str,
+    limit: int = Query(default=40),
+    offset: int = Query(default=0)
+):
+
+    loop = asyncio.get_running_loop()
+
+    transcript_future = loop.run_in_executor(
+        None,
+        lambda: get_transcript(
+            video_id,
+            limit,
+            offset,
+            ""
+        )
+    )
+
+    video_future = loop.run_in_executor(
+        None,
+        lambda: get_video_url(video_id)
+    )
+
+    subtitles, video = await asyncio.gather(
+        transcript_future,
+        video_future
+    )
+
+    return {
+        "video_url": video["video_url"],
+        "title": video["title"],
+        "thumbnail": video["thumbnail"],
+        "subtitles": subtitles
+    }
+
+
 
 # =========================
 # FETCH TRANSCRIPT
