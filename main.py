@@ -197,8 +197,8 @@ def fetch_with_ytdlp_subtitles(video_id: str):
                 "%(id)s.%(ext)s"
             ),
             "quiet": True,
-            "ignoreerrors": True
-            # "cookiesfrombrowser": ("safari",)
+            "ignoreerrors": True,
+            "cookiesfrombrowser": ("safari",)
         }
         if PROXY_URL:
             ydl_opts["proxy"] = PROXY_URL
@@ -608,20 +608,17 @@ def get_video_url(video_id: str):
     try:
         import yt_dlp
 
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        
         cache_key = f"video:{video_id}"
 
         cached = get_cache(cache_key)
-
         if cached is not None:
-             print("VIDEO URL FROM REDIS")
-             return cached
+            print("VIDEO URL FROM REDIS")
+            return cached
 
-
+        url = f"https://www.youtube.com/watch?v={video_id}"
 
         ydl_opts = {
-            "format": "best[ext=mp4]/best",
+            "format": "18/22/best",
             "quiet": True,
             "ignoreerrors": True,
         }
@@ -639,28 +636,28 @@ def get_video_url(video_id: str):
                 "thumbnail": ""
             }
 
-        return {
+        result = {
             "video_url": info.get("url", ""),
             "title": info.get("title", ""),
             "thumbnail": info.get("thumbnail", "")
         }
 
-    except Exception as error:
-        print("VIDEO URL ERROR:", error)
-
-        result = {
-            "video_url": info.get("url", ""),
-            "title": info.get("title", ""),
-            "thumbnail": info.get("thumbnail", "")
-}
-
         set_cache(
             cache_key,
             result,
             VIDEO_URL_TTL
-)
+        )
 
         return result
+
+    except Exception as error:
+        print("VIDEO URL ERROR:", error)
+
+        return {
+            "video_url": "",
+            "title": "",
+            "thumbnail": ""
+        }
     
 # WORD TRANSLATION
 # =========================
