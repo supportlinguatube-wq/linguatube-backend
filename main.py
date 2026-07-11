@@ -238,8 +238,8 @@ def fetch_with_ytdlp_subtitles(video_id: str):
                 "%(id)s.%(ext)s"
             ),
             "quiet": True,
-            "ignoreerrors": True,
-            "cookiesfrombrowser": ("safari",)
+            "ignoreerrors": True
+            
         }
         if PROXY_URL:
             ydl_opts["proxy"] = PROXY_URL
