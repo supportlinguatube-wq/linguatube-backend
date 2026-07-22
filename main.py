@@ -22,6 +22,11 @@ import subprocess
 import tempfile
 import asyncio
 
+from importlib.metadata import version
+
+print("youtube-transcript-api version:", version("youtube-transcript-api"))
+
+
 load_dotenv()
 
 app = FastAPI()
