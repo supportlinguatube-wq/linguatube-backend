@@ -21,6 +21,7 @@ import ftfy
 import subprocess
 import tempfile
 import asyncio
+import httpx
 
 from importlib.metadata import version
 
@@ -331,13 +332,26 @@ def fetch_with_ytdlp_subtitles(video_id: str):
         return []
     
 
+# def fetch_with_youtube_transcript_api(video_id: str):
+
+#     try:
+#         api = YouTubeTranscriptApi()
+
+#         transcript_list = api.list(video_id)
 def fetch_with_youtube_transcript_api(video_id: str):
 
     try:
-        api = YouTubeTranscriptApi()
+        if PROXY_URL:
+            http_client = httpx.Client(
+                proxy=PROXY_URL,
+                timeout=30.0,
+            )
+            api = YouTubeTranscriptApi(http_client=http_client)
+        else:
+            api = YouTubeTranscriptApi()
 
         transcript_list = api.list(video_id)
-
+        
         print("AVAILABLE TRANSCRIPTS:")
 
         for transcript in transcript_list:
