@@ -31,6 +31,14 @@ load_dotenv()
 
 app = FastAPI()
 
+from importlib.metadata import version
+
+@app.get("/version")
+def get_version():
+    return {
+        "youtube_transcript_api": version("youtube-transcript-api")
+    }
+
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
