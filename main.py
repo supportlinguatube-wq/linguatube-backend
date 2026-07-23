@@ -66,7 +66,7 @@ def get_proxy_url():
 
     netloc = f"{parsed.username}:{parsed.password}@{parsed.hostname}:{port}"
 
-    return urlunparse((
+    proxy_url = urlunparse((
         parsed.scheme,
         netloc,
         parsed.path,
@@ -74,6 +74,10 @@ def get_proxy_url():
         parsed.query,
         parsed.fragment,
     ))
+
+    print("USING PROXY:", proxy_url)
+
+    return proxy_url
 # CACHE
 # =========================
 
