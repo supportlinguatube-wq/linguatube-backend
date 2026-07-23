@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import asyncio
 import httpx
-import random
+import hashlib
 from urllib.parse import urlparse, urlunparse
 from importlib.metadata import version
 
@@ -56,15 +56,21 @@ else:
     print("NO PROXY")
 # =========================
 
-def get_proxy_url():
+def get_proxy_url(video_id: str):
     if not PROXY_URL:
         return None
 
     parsed = urlparse(PROXY_URL)
 
-    port = random.randint(10000, 20000)
+    # Har bir video uchun doimiy sticky port
+    port = 10000 + (
+        int(hashlib.md5(video_id.encode()).hexdigest(), 16) % 10001
+    )
 
-    netloc = f"{parsed.username}:{parsed.password}@{parsed.hostname}:{port}"
+    netloc = (
+        f"{parsed.username}:{parsed.password}"
+        f"@{parsed.hostname}:{port}"
+    )
 
     proxy_url = urlunparse((
         parsed.scheme,
@@ -75,7 +81,7 @@ def get_proxy_url():
         parsed.fragment,
     ))
 
-    print("USING PROXY:", proxy_url)
+    print(f"VIDEO {video_id} -> PORT {port}")
 
     return proxy_url
 # CACHE
@@ -165,7 +171,7 @@ async def process_video(
 
 def fetch_transcript(video_id: str):
 
-    proxy_url = get_proxy_url()
+    proxy_url = get_proxy_url(video_id)
 
     cache_key = f"transcript:{video_id}"
 
@@ -519,7 +525,7 @@ def fetch_with_whisper(video_id: str):
         }
 
 
-        proxy_url = get_proxy_url()
+        proxy_url = get_proxy_url(video_id)
 
         if proxy_url:
             ydl_opts["proxy"] = proxy_url
@@ -730,7 +736,7 @@ def get_video_url(video_id: str):
             "ignoreerrors": True,
         }
 
-        proxy_url = get_proxy_url()
+        proxy_url = get_proxy_url(video_id)
 
         if proxy_url:
             ydl_opts["proxy"] = proxy_url
