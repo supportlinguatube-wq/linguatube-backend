@@ -33,7 +33,7 @@ load_dotenv()
 
 app = FastAPI()
 
-from importlib.metadata import version
+
 
 @app.get("/version")
 def get_version():
@@ -227,7 +227,15 @@ def fetch_with_ytdlp_subtitles(video_id: str, proxy_url: str = None):
         available_langs = []
 
         try:
-            api = YouTubeTranscriptApi()
+            if proxy_url:
+                http_client = httpx.Client(
+                    proxy=proxy_url,
+                    timeout=30.0,
+                )
+                api = YouTubeTranscriptApi(http_client=http_client)
+            else:
+                api = YouTubeTranscriptApi()
+
             transcript_list = api.list(video_id)
 
             available_langs = [
@@ -363,14 +371,17 @@ def fetch_with_ytdlp_subtitles(video_id: str, proxy_url: str = None):
 def fetch_with_youtube_transcript_api(video_id: str, proxy_url: str = None):
 
     try:
-        if PROXY_URL:
+        if proxy_url:
             http_client = httpx.Client(
-                proxy=PROXY_URL,
+                proxy=proxy_url,
                 timeout=30.0,
             )
-            api = YouTubeTranscriptApi(http_client=http_client)
         else:
-            api = YouTubeTranscriptApi()
+            http_client = httpx.Client(
+                timeout=30.0,
+            )
+
+        api = YouTubeTranscriptApi(http_client=http_client)
 
         transcript_list = api.list(video_id)
 
@@ -504,8 +515,10 @@ def fetch_with_whisper(video_id: str):
         }
 
 
-        if PROXY_URL:
-            ydl_opts["proxy"] = PROXY_URL
+        proxy_url = get_proxy_url()
+
+        if proxy_url:
+            ydl_opts["proxy"] = proxy_url
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(url, download=True)
@@ -713,8 +726,10 @@ def get_video_url(video_id: str):
             "ignoreerrors": True,
         }
 
-        if PROXY_URL:
-            ydl_opts["proxy"] = PROXY_URL
+        proxy_url = get_proxy_url()
+
+        if proxy_url:
+            ydl_opts["proxy"] = proxy_url
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
