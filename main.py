@@ -22,7 +22,8 @@ import subprocess
 import tempfile
 import asyncio
 import httpx
-
+import random
+from urllib.parse import urlparse, urlunparse
 from importlib.metadata import version
 
 print("youtube-transcript-api version:", version("youtube-transcript-api"))
@@ -54,6 +55,25 @@ if PROXY_URL:
 else:
     print("NO PROXY")
 # =========================
+
+def get_proxy_url():
+    if not PROXY_URL:
+        return None
+
+    parsed = urlparse(PROXY_URL)
+
+    port = random.randint(10000, 20000)
+
+    netloc = f"{parsed.username}:{parsed.password}@{parsed.hostname}:{port}"
+
+    return urlunparse((
+        parsed.scheme,
+        netloc,
+        parsed.path,
+        parsed.params,
+        parsed.query,
+        parsed.fragment,
+    ))
 # CACHE
 # =========================
 
@@ -141,6 +161,8 @@ async def process_video(
 
 def fetch_transcript(video_id: str):
 
+    proxy_url = get_proxy_url()
+
     cache_key = f"transcript:{video_id}"
 
     cached = get_cache(cache_key)
@@ -154,7 +176,7 @@ def fetch_transcript(video_id: str):
         return TRANSCRIPT_CACHE[video_id]
 
     # 1) FIRST: youtube-transcript-api
-    items = fetch_with_youtube_transcript_api(video_id)
+    items = fetch_with_youtube_transcript_api(video_id, proxy_url)
 
     if items:
         TRANSCRIPT_CACHE[video_id] = items
@@ -168,7 +190,7 @@ def fetch_transcript(video_id: str):
         return items
 
     # 2) SECOND: yt-dlp fallback
-    items = fetch_with_ytdlp_subtitles(video_id)
+    items = fetch_with_ytdlp_subtitles(video_id, proxy_url)
 
     if items:
         TRANSCRIPT_CACHE[video_id] = items
@@ -193,7 +215,7 @@ def fetch_transcript(video_id: str):
     return []
 # =========================
 
-def fetch_with_ytdlp_subtitles(video_id: str):
+def fetch_with_ytdlp_subtitles(video_id: str, proxy_url: str = None):
 
     try:
         import yt_dlp
@@ -255,8 +277,8 @@ def fetch_with_ytdlp_subtitles(video_id: str):
             "ignoreerrors": True
             
         }
-        if PROXY_URL:
-            ydl_opts["proxy"] = PROXY_URL
+        if proxy_url:
+            ydl_opts["proxy"] = proxy_url
 
 
 
@@ -338,7 +360,7 @@ def fetch_with_ytdlp_subtitles(video_id: str):
 #         api = YouTubeTranscriptApi()
 
 #         transcript_list = api.list(video_id)
-def fetch_with_youtube_transcript_api(video_id: str):
+def fetch_with_youtube_transcript_api(video_id: str, proxy_url: str = None):
 
     try:
         if PROXY_URL:
@@ -351,7 +373,7 @@ def fetch_with_youtube_transcript_api(video_id: str):
             api = YouTubeTranscriptApi()
 
         transcript_list = api.list(video_id)
-        
+
         print("AVAILABLE TRANSCRIPTS:")
 
         for transcript in transcript_list:
