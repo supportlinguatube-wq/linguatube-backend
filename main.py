@@ -13,7 +13,7 @@ from cache import (
 )
 
 
-
+import random
 import os
 import json
 import re
@@ -47,6 +47,7 @@ client = OpenAI(
 
 MODEL = "gpt-4.1-mini"
 
+VIDEO_PROXY_CACHE = {}
 
 PROXY_URL = os.getenv("YTDLP_PROXY")
 
@@ -56,21 +57,21 @@ else:
     print("NO PROXY")
 # =========================
 
-def get_proxy_url(video_id: str):
+def get_proxy_url(video_id: str = None):
+
     if not PROXY_URL:
         return None
 
     parsed = urlparse(PROXY_URL)
 
-    # Har bir video uchun doimiy sticky port
-    port = 10000 + (
-        int(hashlib.md5(video_id.encode()).hexdigest(), 16) % 10001
-    )
+    # Shu video uchun oldingi ishlagan portni ishlatamiz
+    if video_id and video_id in VIDEO_PROXY_CACHE:
+        port = VIDEO_PROXY_CACHE[video_id]
+    else:
+        port = random.randint(10000, 20000)
+        VIDEO_PROXY_CACHE[video_id] = port
 
-    netloc = (
-        f"{parsed.username}:{parsed.password}"
-        f"@{parsed.hostname}:{port}"
-    )
+    netloc = f"{parsed.username}:{parsed.password}@{parsed.hostname}:{port}"
 
     proxy_url = urlunparse((
         parsed.scheme,
@@ -84,6 +85,31 @@ def get_proxy_url(video_id: str):
     print(f"VIDEO {video_id} -> PORT {port}")
 
     return proxy_url
+
+def rotate_proxy(video_id: str):
+
+    parsed = urlparse(PROXY_URL)
+
+    for _ in range(10):
+
+        port = random.randint(10000, 20000)
+
+        VIDEO_PROXY_CACHE[video_id] = port
+
+        netloc = f"{parsed.username}:{parsed.password}@{parsed.hostname}:{port}"
+
+        proxy_url = urlunparse((
+            parsed.scheme,
+            netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        ))
+
+        print(f"TRY NEW PORT {port}")
+
+        yield proxy_url
 # CACHE
 # =========================
 
@@ -188,6 +214,17 @@ def fetch_transcript(video_id: str):
     # 1) FIRST: youtube-transcript-api
     items = fetch_with_youtube_transcript_api(video_id, proxy_url)
 
+    if not items:
+
+        for proxy_url in rotate_proxy(video_id):
+
+            items = fetch_with_youtube_transcript_api(video_id, proxy_url)
+
+            if items:
+
+                break
+
+
     if items:
         TRANSCRIPT_CACHE[video_id] = items
 
@@ -201,6 +238,14 @@ def fetch_transcript(video_id: str):
 
     # 2) SECOND: yt-dlp fallback
     items = fetch_with_ytdlp_subtitles(video_id, proxy_url)
+
+    if not items:
+        for proxy_url in rotate_proxy(video_id):
+
+            items = fetch_with_ytdlp_subtitles(video_id, proxy_url)
+
+            if items:
+                break
 
     if items:
         TRANSCRIPT_CACHE[video_id] = items
