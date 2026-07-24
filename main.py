@@ -190,7 +190,39 @@ async def process_video(
     }
 
 
+def detect_video_language(video_id: str, proxy_url: str = None):
 
+    try:
+        import yt_dlp
+
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+        ydl_opts = {
+            "quiet": True,
+            "skip_download": True,
+        }
+
+        if proxy_url:
+            ydl_opts["proxy"] = proxy_url
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        language = (
+            info.get("language")
+            or info.get("default_language")
+            or ""
+        ).lower()
+
+        print("VIDEO LANGUAGE:", language)
+
+        return language
+
+    except Exception as e:
+
+        print("VIDEO LANGUAGE ERROR:", e)
+
+        return ""
 # =========================
 # FETCH TRANSCRIPT
 # =========================
@@ -267,7 +299,11 @@ def fetch_transcript(video_id: str):
     #     TRANSCRIPT_CACHE[video_id] = items
     #     return items
 
-    return []
+    return [{
+    "text": "NO_SUBTITLE_AVAILABLE",
+    "start": 0,
+    "duration": 0
+    }]
 # =========================
 
 def fetch_with_ytdlp_subtitles(video_id: str, proxy_url: str = None):
@@ -450,7 +486,26 @@ def fetch_with_youtube_transcript_api(video_id: str, proxy_url: str = None):
 
         selected = None
 
-        preferred_order = [
+        # preferred_order = [
+        #     "en",
+        #     "ru",
+        #     "ar",
+        #     "zh",
+        #     "ko",
+        #     "ja"
+        # ]
+        
+        video_language = detect_video_language(
+            video_id,
+            proxy_url
+        )
+
+        preferred_order = []
+
+        if video_language:
+            preferred_order.append(video_language)
+
+        preferred_order += [
             "en",
             "ru",
             "ar",
@@ -733,6 +788,15 @@ def get_transcript(
 ):
 
     raw_items = fetch_transcript(video_id)
+
+    if (
+        len(raw_items) == 1
+        and raw_items[0]["text"] == "NO_SUBTITLE_AVAILABLE"
+    ):
+        return {
+            "error": True,
+            "message": "Bu videoda subtitle mavjud emas."
+    }
 
     if not raw_items:
         return []
