@@ -918,7 +918,7 @@ def translate_word(
 ):
 
     word = clean_text(word)
-    cache_key = f"word:{word.lower()}"
+    cache_key = f"word:{word.strip().lower()}"
 
     cached = get_cache(cache_key)
 
@@ -935,6 +935,27 @@ def translate_word(
             "translated": ""
         }
 
+    # response = client.chat.completions.create(
+
+    #     model=MODEL,
+
+    #     messages=[
+
+    #         {
+    #             "role": "system",
+    #             "content":
+    #                 "Translate this word into Uzbek. Return only translation."
+    #         },
+
+    #         {
+    #             "role": "user",
+    #             "content": word
+    #         }
+    #     ],
+
+    #     temperature=0.2
+    # )
+
     response = client.chat.completions.create(
 
         model=MODEL,
@@ -942,19 +963,30 @@ def translate_word(
         messages=[
 
             {
-                "role": "system",
-                "content":
-                    "Translate this word into Uzbek. Return only translation."
-            },
+               "role": "system",
+               "content": (
+                    "You are a professional multilingual dictionary.\n"
+                    "Detect the source language automatically.\n"
+                    "Translate the given word or short phrase into natural Uzbek Latin.\n"
+                    "Always use Uzbek Latin alphabet.\n"
+                    "Never use Cyrillic.\n"
+                    "Return only the Uzbek translation.\n"
+                    "Never explain.\n"
+                    "Never add examples.\n"
+                    "Never add pronunciation.\n"
+                    "Never add punctuation.\n"
+                    "If there are multiple meanings, return the most common one."
+            )
+        },
 
-            {
-                "role": "user",
-                "content": word
-            }
-        ],
+        {
+            "role": "user",
+            "content": word
+        }
+    ],
 
-        temperature=0.2
-    )
+    temperature=0
+)
 
     translated = (
         response
