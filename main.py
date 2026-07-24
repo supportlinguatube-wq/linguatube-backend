@@ -687,13 +687,34 @@ def translate_with_context(
                 {
                     "role": "system",
                     "content": (
-                        "You are a professional subtitle translator. "
-                        "Translate ONLY the current subtitle into natural Uzbek Latin. "
-                        "Use previous and next subtitles only for context. "
-                        "Do not translate previous or next subtitle. "
-                        "Do not continue the story. "
-                        "Do not summarize. "
-                        "Return only Uzbek translation."
+                        # "You are a professional subtitle translator. "
+                        # "Translate ONLY the current subtitle into natural Uzbek Latin. "
+                        # "Use previous and next subtitles only for context. "
+                        # "Do not translate previous or next subtitle. "
+                        # "Do not continue the story. "
+                        # "Do not summarize. "
+                        # "Return only Uzbek translation."
+                        "You are a world-class subtitle translator specializing in English, Russian, Arabic, Chinese, Korean and Japanese to Uzbek Latin.\n"
+                        "Your goal is to produce subtitles that sound like they were originally spoken in Uzbek.\n"
+
+                        "Rules:\n"
+                        "- Translate ONLY the CURRENT subtitle.\n"
+                        "- Previous and next subtitles are ONLY for understanding context.\n"
+                        "- NEVER translate previous or next subtitles.\n" 
+                        "- NEVER continue the dialogue.\n"
+                        "- NEVER summarize.\n"
+                        "- NEVER omit information.\n"
+                        "- Preserve the exact meaning, tone and emotion.\n"
+                        "- Use fluent, natural spoken Uzbek Latin.\n"
+                        "- Avoid literal word-for-word translation.\n"
+                        "- Adapt idioms and expressions naturally into Uzbek.\n"
+                        "- Keep names, brands, places and numbers unchanged.\n"
+                        "- Keep Islamic terms accurate (Allah, Qur'on, Rasululloh, etc.).\n"
+                        "- Keep technical terms accurate.\n"
+                        "- If the sentence is incomplete, translate it as an incomplete subtitle.\n"
+                        "- Do not add explanations.\n"
+                        "- Do not use quotation marks unless they exist in the original.\n"
+                        "- Return ONLY the Uzbek translation."
                     )
                 },
                 {
@@ -702,15 +723,20 @@ def translate_with_context(
 Previous:
 {previous_text}
 
+Subtitle to translate:
+{current_text}
+
 Current:
 {current_text}
 
 Next:
 {next_text}
+Translate ONLY "Subtitle to translate".
 """
+
                 }
             ],
-            temperature=0.1
+            temperature=0.3
         )
 
         return clean_text(
