@@ -829,6 +829,16 @@ def get_transcript(
     nocache: str = Query(default="")
 ):
 
+    # Translation cache
+    cache_key = f"translation:{video_id}:{offset}:{limit}"
+
+    if not nocache:
+        cached = get_cache(cache_key)
+
+        if cached is not None:
+            print("TRANSLATION FROM REDIS")
+            return cached
+
     raw_items = fetch_transcript(video_id)
 
     if (
@@ -838,7 +848,7 @@ def get_transcript(
         return {
             "error": True,
             "message": "Bu videoda subtitle mavjud emas."
-    }
+        }
 
     if not raw_items:
         return []
@@ -856,7 +866,6 @@ def get_transcript(
         chunk,
         start=offset
     ):
-
         prepared.append({
             "index": absolute_index,
             "text": item["text"],
@@ -864,7 +873,16 @@ def get_transcript(
             "duration": item["duration"]
         })
 
-    return translate_batch(prepared)
+    translated = translate_batch(prepared)
+
+    set_cache(
+        cache_key,
+        translated,
+        TRANSLATION_TTL
+    )
+
+    return translated
+
 
 
 @app.get("/video-url/{video_id}")
