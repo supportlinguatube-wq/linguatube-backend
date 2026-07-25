@@ -2,7 +2,7 @@ from fastapi import FastAPI, Query
 from youtube_transcript_api import YouTubeTranscriptApi
 from openai import OpenAI
 from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor
+
 from cache import (
     get_cache,
     set_cache,
@@ -674,135 +674,151 @@ def fetch_with_whisper(video_id: str):
         return []    
 # TRANSLATE BATCH
 # =========================
-def translate_with_context(
-    current_text: str,
-    previous_text: str = "",
-    next_text: str = ""
-) -> str:
+def translate_batch_once(items):
 
     try:
+
+        payload = [
+            {
+                "id": item["index"],
+                "text": clean_text(item["text"])
+            }
+            for item in items
+        ]
+
         response = client.chat.completions.create(
+
             model=MODEL,
+
+            temperature=0,
+
+            response_format={"type": "json_object"},
+
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        # "You are a professional subtitle translator. "
-                        # "Translate ONLY the current subtitle into natural Uzbek Latin. "
-                        # "Use previous and next subtitles only for context. "
-                        # "Do not translate previous or next subtitle. "
-                        # "Do not continue the story. "
-                        # "Do not summarize. "
-                        # "Return only Uzbek translation."
-                        "You are a world-class subtitle translator specializing in English, Russian, Arabic, Chinese, Korean and Japanese to Uzbek Latin.\n"
-                        "Your goal is to produce subtitles that sound like they were originally spoken in Uzbek.\n"
+                    "content": """
+You are a professional subtitle translator.
 
-                        "Rules:\n"
-                        "- Translate ONLY the CURRENT subtitle.\n"
-                        "- Previous and next subtitles are ONLY for understanding context.\n"
-                        "- NEVER translate previous or next subtitles.\n" 
-                        "- NEVER continue the dialogue.\n"
-                        "- NEVER summarize.\n"
-                        "- NEVER omit information.\n"
-                        "- Preserve the exact meaning, tone and emotion.\n"
-                        "- Use fluent, natural spoken Uzbek Latin.\n"
-                        "- Avoid literal word-for-word translation.\n"
-                        "- Adapt idioms and expressions naturally into Uzbek.\n"
-                        "- Keep names, brands, places and numbers unchanged.\n"
-                        "- Keep Islamic terms accurate (Allah, Qur'on, Rasululloh, etc.).\n"
-                        "- Keep technical terms accurate.\n"
-                        "- If the sentence is incomplete, translate it as an incomplete subtitle.\n"
-                        "- Do not add explanations.\n"
-                        "- Do not use quotation marks unless they exist in the original.\n"
-                        "- Return ONLY the Uzbek translation."
-                    )
+Translate the subtitles into natural spoken Uzbek Latin.
+
+Rules:
+
+- Translate EVERY subtitle.
+- Do NOT merge subtitles.
+- Keep the same ids.
+- Preserve subtitle order.
+- Use neighbouring subtitles for context.
+- If a sentence is split across multiple subtitles, translate naturally while keeping each subtitle separate.
+- Keep names, brands, places and numbers unchanged.
+- Keep incomplete subtitles incomplete.
+- Never explain.
+- Never summarize.
+- Return ONLY JSON.
+- Never skip subtitles.
+- Never split subtitles.
+- Keep emotional tone.
+- Preserve punctuation when possible.
+- Use fluent spoken Uzbek.
+- Keep translation length similar to the original.
+If a subtitle is only part of a sentence, translate it as a sentence fragment.
+Do not complete unfinished sentences.
+Do not translate filler sounds such as "uh", "um", "hmm" unless they have a natural Uzbek equivalent.
+
+
+Format:
+
+{
+  "subtitles":[
+      {
+          "id":1,
+          "translated":"..."
+      }
+  ]
+}
+"""
                 },
                 {
                     "role": "user",
-                    "content": f"""
-Previous:
-{previous_text}
-
-Subtitle to translate:
-{current_text}
-
-Current:
-{current_text}
-
-Next:
-{next_text}
-Translate ONLY "Subtitle to translate".
-"""
-
+                    "content": json.dumps(
+                        {
+                            "subtitles": payload
+                        },
+                        ensure_ascii=False
+                    )
                 }
-            ],
-            temperature=0.3
+            ]
         )
 
-        return clean_text(
-            response.choices[0].message.content.strip()
-        )
+        result = json.loads(response.choices[0].message.content)
 
-    except Exception as error:
-        print("TRANSLATE CONTEXT ERROR:", error)
-        return current_text
+        subtitles = result.get("subtitles", [])
+
+        translated = {
+            item["id"]: item["translated"]
+            for item in subtitles
+            if "id" in item and "translated" in item
+}
+
+
+        output = []
+
+        for item in items:
+
+            output.append({
+                "index": item["index"],
+                "text": item["text"],
+                "translated": clean_text(
+                    translated.get(
+                        item["index"],
+                        item["text"]
+                    )
+                ),
+                "start": item["start"],
+                "duration": item["duration"]
+            })
+
+        return output
+
+    except Exception as e:
+
+        print(e)
+
+        return [
+            {
+                "index": item["index"],
+                "text": item["text"],
+                "translated": item["text"],
+                "start": item["start"],
+                "duration": item["duration"]
+            }
+            for item in items
+        ]
+
 
 # =========================
 
 
 def translate_batch(items):
 
-    def worker(i):
+    BATCH_SIZE = 10
 
-        item = items[i]
+    translated = []
 
-        previous_text = ""
-        next_text = ""
+    for i in range(0, len(items), BATCH_SIZE):
 
-        if i > 0:
-            previous_text = clean_text(
-                items[i - 1]["text"]
-            )
+        batch = items[i:i+BATCH_SIZE]
 
-        if i < len(items) - 1:
-            next_text = clean_text(
-                items[i + 1]["text"]
-            )
-
-        original = clean_text(
-            item["text"]
+        translated.extend(
+            translate_batch_once(batch)
         )
 
-        translated = translate_with_context(
-            current_text=original,
-            previous_text=previous_text,
-            next_text=next_text
-        )
-
-        return {
-            "index": item["index"],
-            "text": original,
-            "translated": translated,
-            "start": item["start"],
-            "duration": item["duration"]
-        }
-
-    with ThreadPoolExecutor(
-        max_workers=5
-    ) as executor:
-
-        result = list(
-            executor.map(
-                worker,
-                range(len(items))
-            )
-        )
-
-    result.sort(
+    translated.sort(
         key=lambda x: x["index"]
     )
 
-    return result
+    return translated
+
 # TRANSCRIPT API
 # =========================
 @app.get("/transcript/{video_id}")
