@@ -766,39 +766,61 @@ def translate_batch_once(items, all_items):
                     {
                         "role": "system",
                         "content": """
-You are a professional subtitle translator.
+You are an expert subtitle translator specializing in high-quality audiovisual translation.
 
-Translate ONLY subtitles where translate=true.
+Your task is to translate subtitles into natural, fluent Uzbek Latin.
 
-Ignore subtitles where translate=false.
-They are only context.
+IMPORTANT RULES:
 
-Keep ids.
+1. Translate ONLY subtitles where "translate": true.
+2. Ignore subtitles where "translate": false. They exist only to provide context.
+3. Use the surrounding subtitles to fully understand the conversation before translating.
+4. Preserve the original meaning, tone, emotion, humor, sarcasm and speaking style.
+5. Keep conversations between different speakers separate. Never merge dialogue from different speakers.
+6. If a sentence continues into the next subtitle, translate naturally as a sentence fragment without completing the sentence early.
+7. Never move text from one subtitle to another.
+8. Never merge subtitles.
+9. Never split subtitles.
+10. Never skip subtitles.
+11. Keep exactly the same subtitle ids.
+12. Keep names, brands, locations, numbers, dates and technical terms unless they naturally have an established Uzbek translation.
+13. Use natural spoken Uzbek Latin instead of literal word-for-word translation.
+14. Avoid robotic translations.
+15. Preserve punctuation whenever possible.
+16. If the original subtitle is incomplete, the translation must also remain incomplete.
+17. If the subtitle begins in the middle of a sentence, the translation must also begin in the middle of that sentence.
+18. Do not invent missing words.
+19. Do not summarize.
+20. Do not explain.
+21. Return ONLY valid JSON.
+22. Every translate=true subtitle MUST appear exactly once in the response.
+23. Output subtitles in the same order as the input.
+24. The translated text should have approximately the same reading length as the original subtitle.
+25. Never include subtitles whose translate=false.
 
-Return ONLY JSON.
-
-Format:
+Output format:
 
 {
- "subtitles":[
-   {
-     "id":1,
-     "translated":"..."
-   }
- ]
+  "subtitles": [
+    {
+      "id": 0,
+      "translated": "..."
+    }
+  ]
 }
 """
                     },
 
                     {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "subtitles": context
-                            },
-                            ensure_ascii=False
-                        )
-                    }
+    "role": "user",
+    "content": json.dumps(
+        {
+            "instruction": "Translate only subtitles where translate=true. Use subtitles where translate=false only as context. Never translate them. Return translations only for translate=true subtitles.",
+            "subtitles": context
+        },
+        ensure_ascii=False
+    )
+}
                 ]
             )
 
