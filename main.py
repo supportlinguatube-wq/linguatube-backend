@@ -2,7 +2,7 @@ from fastapi import FastAPI, Query
 from youtube_transcript_api import YouTubeTranscriptApi
 from openai import OpenAI
 from dotenv import load_dotenv
-
+from concurrent.futures import ThreadPoolExecutor
 from cache import (
     get_cache,
     set_cache,
@@ -12,7 +12,7 @@ from cache import (
     WORD_TTL
 )
 
-import time
+
 import random
 import os
 import json
@@ -672,270 +672,141 @@ def fetch_with_whisper(video_id: str):
         print("WHISPER TRANSCRIPT ERROR:", error)
 
         return []    
-
-def parse_translation_response(content: str, expected_ids):
-
-    content = content.strip()
-
-    if content.startswith("```"):
-        content = re.sub(r"^```json", "", content)
-        content = re.sub(r"^```", "", content)
-        content = re.sub(r"```$", "", content)
-        content = content.strip()
-
-    data = json.loads(content)
-
-    validate_translation(
-        data,
-        expected_ids
-    )
-
-    return data
-
-
-def validate_translation(data, expected_ids):
-
-    if not isinstance(data, dict):
-        raise ValueError()
-
-    subtitles = data.get("subtitles")
-
-    if not isinstance(subtitles, list):
-        raise ValueError()
-
-    received = set()
-
-    for item in subtitles:
-
-        if not isinstance(item, dict):
-            raise ValueError()
-
-        if "id" not in item:
-            raise ValueError()
-
-        if "translated" not in item:
-            raise ValueError()
-
-        if not isinstance(item["translated"], str):
-            raise ValueError()
-
-        received.add(item["id"])
-
-    if received != expected_ids:
-        raise ValueError("Missing subtitle ids")
-
-    return subtitles    
 # TRANSLATE BATCH
 # =========================
-def translate_batch_once(items, all_items):
+def translate_with_context(
+    current_text: str,
+    previous_text: str = "",
+    next_text: str = ""
+) -> str:
 
-    MAX_RETRY = 2
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        # "You are a professional subtitle translator. "
+                        # "Translate ONLY the current subtitle into natural Uzbek Latin. "
+                        # "Use previous and next subtitles only for context. "
+                        # "Do not translate previous or next subtitle. "
+                        # "Do not continue the story. "
+                        # "Do not summarize. "
+                        # "Return only Uzbek translation."
+                        "You are a world-class subtitle translator specializing in English, Russian, Arabic, Chinese, Korean and Japanese to Uzbek Latin.\n"
+                        "Your goal is to produce subtitles that sound like they were originally spoken in Uzbek.\n"
 
-    position = all_items.index(items[0])
+                        "Rules:\n"
+                        "- Translate ONLY the CURRENT subtitle.\n"
+                        "- Previous and next subtitles are ONLY for understanding context.\n"
+                        "- NEVER translate previous or next subtitles.\n" 
+                        "- NEVER continue the dialogue.\n"
+                        "- NEVER summarize.\n"
+                        "- NEVER omit information.\n"
+                        "- Preserve the exact meaning, tone and emotion.\n"
+                        "- Use fluent, natural spoken Uzbek Latin.\n"
+                        "- Avoid literal word-for-word translation.\n"
+                        "- Adapt idioms and expressions naturally into Uzbek.\n"
+                        "- Keep names, brands, places and numbers unchanged.\n"
+                        "- Keep Islamic terms accurate (Allah, Qur'on, Rasululloh, etc.).\n"
+                        "- Keep technical terms accurate.\n"
+                        "- If the sentence is incomplete, translate it as an incomplete subtitle.\n"
+                        "- Do not add explanations.\n"
+                        "- Do not use quotation marks unless they exist in the original.\n"
+                        "- Return ONLY the Uzbek translation."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"""
+Previous:
+{previous_text}
 
-    start = max(position - 2, 0)
-    end = min(
-        position + len(items) + 2,
-        len(all_items)
-)
+Subtitle to translate:
+{current_text}
 
-    context = []
+Current:
+{current_text}
 
-    for item in all_items[start:end]:
-
-        context.append({
-            "id": item["index"],
-            "text": clean_text(item["text"]),
-            "translate": item in items
-    })
-
-    for attempt in range(MAX_RETRY):
-
-        try:
-
-            response = client.chat.completions.create(
-
-                model=MODEL,
-
-                temperature=0,
-
-                response_format={"type": "json_object"},
-
-                messages=[
-
-                    {
-                        "role": "system",
-                        "content": """
-You are an expert subtitle translator specializing in high-quality audiovisual translation.
-
-Your task is to translate subtitles into natural, fluent Uzbek Latin.
-
-IMPORTANT RULES:
-
-1. Translate ONLY subtitles where "translate": true.
-2. Ignore subtitles where "translate": false. They exist only to provide context.
-3. Use the surrounding subtitles to fully understand the conversation before translating.
-4. Preserve the original meaning, tone, emotion, humor, sarcasm and speaking style.
-5. Keep conversations between different speakers separate. Never merge dialogue from different speakers.
-6. If a sentence continues into the next subtitle, translate naturally as a sentence fragment without completing the sentence early.
-7. Never move text from one subtitle to another.
-8. Never merge subtitles.
-9. Never split subtitles.
-10. Never skip subtitles.
-11. Keep exactly the same subtitle ids.
-12. Keep names, brands, locations, numbers, dates and technical terms unless they naturally have an established Uzbek translation.
-13. Use natural spoken Uzbek Latin instead of literal word-for-word translation.
-14. Avoid robotic translations.
-15. Preserve punctuation whenever possible.
-16. If the original subtitle is incomplete, the translation must also remain incomplete.
-17. If the subtitle begins in the middle of a sentence, the translation must also begin in the middle of that sentence.
-18. Do not invent missing words.
-19. Do not summarize.
-20. Do not explain.
-21. Return ONLY valid JSON.
-22. Every translate=true subtitle MUST appear exactly once in the response.
-23. Output subtitles in the same order as the input.
-24. The translated text should have approximately the same reading length as the original subtitle.
-25. Never include subtitles whose translate=false.
-
-Output format:
-
-{
-  "subtitles": [
-    {
-      "id": 0,
-      "translated": "..."
-    }
-  ]
-}
+Next:
+{next_text}
+Translate ONLY "Subtitle to translate".
 """
-                    },
 
-                    {
-    "role": "user",
-    "content": json.dumps(
-        {
-            "instruction": "Translate only subtitles where translate=true. Use subtitles where translate=false only as context. Never translate them. Return translations only for translate=true subtitles.",
-            "subtitles": context
-        },
-        ensure_ascii=False
-    )
-}
-                ]
+                }
+            ],
+            temperature=0.3
+        )
+
+        return clean_text(
+            response.choices[0].message.content.strip()
+        )
+
+    except Exception as error:
+        print("TRANSLATE CONTEXT ERROR:", error)
+        return current_text
+
+# =========================
+
+
+def translate_batch(items):
+
+    def worker(i):
+
+        item = items[i]
+
+        previous_text = ""
+        next_text = ""
+
+        if i > 0:
+            previous_text = clean_text(
+                items[i - 1]["text"]
             )
 
-            expected_ids = {
-                x["index"]
-                for x in items
-            }
-
-            result = parse_translation_response(
-                response.choices[0].message.content,
-                expected_ids
+        if i < len(items) - 1:
+            next_text = clean_text(
+                items[i + 1]["text"]
             )
 
-            translated = {
-                x["id"]: x["translated"]
-                for x in result["subtitles"]
-            }
+        original = clean_text(
+            item["text"]
+        )
 
-            output = []
+        translated = translate_with_context(
+            current_text=original,
+            previous_text=previous_text,
+            next_text=next_text
+        )
 
-            for item in items:
-
-                output.append({
-
-                    "index": item["index"],
-
-                    "text": item["text"],
-
-                    "translated": clean_text(
-                        translated.get(
-                            item["index"],
-                            item["text"]
-                        )
-                    ),
-
-                    "start": item["start"],
-
-                    "duration": item["duration"]
-                })
-
-            return output
-
-        except Exception as e:
-
-            print("Retry:", attempt + 1, e)
-
-            if attempt < MAX_RETRY - 1:
-
-                time.sleep(1)
-
-                continue
-
-    print("Translation failed.")
-
-    return [
-
-        {
+        return {
             "index": item["index"],
-            "text": item["text"],
-            "translated": item["text"],
+            "text": original,
+            "translated": translated,
             "start": item["start"],
             "duration": item["duration"]
         }
 
-        for item in items
-    ]
-# =========================
+    with ThreadPoolExecutor(
+        max_workers=5
+    ) as executor:
 
-
-async def translate_batch(items, all_items):
-
-    BATCH_SIZE = 8
-    MAX_PARALLEL = 4
-
-    tasks = []
-
-    for i in range(0, len(items), BATCH_SIZE):
-
-        batch = items[i:i+BATCH_SIZE]
-
-        tasks.append(
-            asyncio.to_thread(
-                translate_batch_once,
-                batch,
-                all_items
+        result = list(
+            executor.map(
+                worker,
+                range(len(items))
             )
         )
 
-    translated = []
+    result.sort(
+        key=lambda x: x["index"]
+    )
 
-    for i in range(0, len(tasks), MAX_PARALLEL):
-
-        group = tasks[i:i+MAX_PARALLEL]
-
-        results = await asyncio.gather(
-            *group,
-            return_exceptions=True
-        )
-
-        for result in results:
-
-            if isinstance(result, Exception):
-                print("TRANSLATION TASK ERROR:", result)
-                continue
-
-            translated.extend(result)
-
-    translated.sort(key=lambda x: x["index"])
-
-    return translated
-
-
-
+    return result
+# TRANSCRIPT API
+# =========================
 @app.get("/transcript/{video_id}")
-async def get_transcript(
+def get_transcript(
     video_id: str,
     limit: int = Query(default=40),
     offset: int = Query(default=0),
@@ -951,42 +822,46 @@ async def get_transcript(
         return {
             "error": True,
             "message": "Bu videoda subtitle mavjud emas."
-        }
+    }
 
     if not raw_items:
         return []
 
-    prepared_all = []
-
-    for index, item in enumerate(raw_items):
-
-        prepared_all.append({
-
-            "index": index,
-
-            "text": item["text"],
-
-            "start": item["start"],
-
-            "duration": item["duration"]
-        })
-
-    chunk = prepared_all[offset:offset+limit]
+    chunk = raw_items[
+        offset:offset + limit
+    ]
 
     if not chunk:
         return []
 
-    return await translate_batch(
-        chunk,
-        prepared_all
-    )
+    prepared = []
 
+    for absolute_index, item in enumerate(
+        chunk,
+        start=offset
+    ):
+
+        prepared.append({
+            "index": absolute_index,
+            "text": item["text"],
+            "start": item["start"],
+            "duration": item["duration"]
+        })
+
+    return translate_batch(prepared)
 
 
 @app.get("/video-url/{video_id}")
 def get_video_url(video_id: str):
     try:
         import yt_dlp
+
+        cache_key = f"video:{video_id}"
+
+        cached = get_cache(cache_key)
+        if cached is not None:
+            print("VIDEO URL FROM REDIS")
+            return cached
 
         url = f"https://www.youtube.com/watch?v={video_id}"
 
@@ -1002,10 +877,7 @@ def get_video_url(video_id: str):
             ydl_opts["proxy"] = proxy_url
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(
-                url,
-                download=False
-            )
+            info = ydl.extract_info(url, download=False)
 
         if not info:
             return {
@@ -1014,12 +886,20 @@ def get_video_url(video_id: str):
                 "thumbnail": ""
             }
 
-        return {
+        result = {
             "video_url": info.get("url", ""),
             "title": info.get("title", ""),
             "thumbnail": info.get("thumbnail", "")
         }
-    
+
+        set_cache(
+            cache_key,
+            result,
+            VIDEO_URL_TTL
+        )
+
+        return result
+
     except Exception as error:
         print("VIDEO URL ERROR:", error)
 
