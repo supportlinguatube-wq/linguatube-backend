@@ -12,7 +12,7 @@ from cache import (
     WORD_TTL
 )
 
-
+import time
 import random
 import os
 import json
@@ -672,172 +672,253 @@ def fetch_with_whisper(video_id: str):
         print("WHISPER TRANSCRIPT ERROR:", error)
 
         return []    
+
+def parse_translation_response(content: str, expected_ids):
+
+    content = content.strip()
+
+    if content.startswith("```"):
+        content = re.sub(r"^```json", "", content)
+        content = re.sub(r"^```", "", content)
+        content = re.sub(r"```$", "", content)
+        content = content.strip()
+
+    data = json.loads(content)
+
+    validate_translation(
+        data,
+        expected_ids
+    )
+
+    return data
+
+
+def validate_translation(data, expected_ids):
+
+    if not isinstance(data, dict):
+        raise ValueError()
+
+    subtitles = data.get("subtitles")
+
+    if not isinstance(subtitles, list):
+        raise ValueError()
+
+    received = set()
+
+    for item in subtitles:
+
+        if not isinstance(item, dict):
+            raise ValueError()
+
+        if "id" not in item:
+            raise ValueError()
+
+        if "translated" not in item:
+            raise ValueError()
+
+        if not isinstance(item["translated"], str):
+            raise ValueError()
+
+        received.add(item["id"])
+
+    if received != expected_ids:
+        raise ValueError("Missing subtitle ids")
+
+    return subtitles    
 # TRANSLATE BATCH
 # =========================
-def translate_batch_once(items):
+def translate_batch_once(items, all_items):
 
-    try:
+    MAX_RETRY = 2
 
-        payload = [
-            {
-                "id": item["index"],
-                "text": clean_text(item["text"])
-            }
-            for item in items
-        ]
+    position = all_items.index(items[0])
 
-        response = client.chat.completions.create(
+    start = max(position - 2, 0)
+    end = min(
+        position + len(items) + 2,
+        len(all_items)
+)
 
-            model=MODEL,
+    context = []
 
-            temperature=0,
+    for item in all_items[start:end]:
 
-            response_format={"type": "json_object"},
+        context.append({
+            "id": item["index"],
+            "text": clean_text(item["text"]),
+            "translate": item in items
+    })
 
-            messages=[
-                {
-                    "role": "system",
-                    "content": """
+    for attempt in range(MAX_RETRY):
+
+        try:
+
+            response = client.chat.completions.create(
+
+                model=MODEL,
+
+                temperature=0,
+
+                response_format={"type": "json_object"},
+
+                messages=[
+
+                    {
+                        "role": "system",
+                        "content": """
 You are a professional subtitle translator.
 
-Translate the subtitles into natural spoken Uzbek Latin.
+Translate ONLY subtitles where translate=true.
 
-Rules:
+Ignore subtitles where translate=false.
+They are only context.
 
-- Translate EVERY subtitle.
-- Do NOT merge subtitles.
-- Keep the same ids.
-- Preserve subtitle order.
-- Use neighbouring subtitles for context.
-- If a sentence is split across multiple subtitles, translate naturally while keeping each subtitle separate.
-- Keep names, brands, places and numbers unchanged.
-- Keep incomplete subtitles incomplete.
-- Never explain.
-- Never summarize.
-- Return ONLY JSON.
-- Never skip subtitles.
-- Never split subtitles.
-- Keep emotional tone.
-- Preserve punctuation when possible.
-- Use fluent spoken Uzbek.
-- Keep translation length similar to the original.
-If a subtitle is only part of a sentence, translate it as a sentence fragment.
-Do not complete unfinished sentences.
-Do not translate filler sounds such as "uh", "um", "hmm" unless they have a natural Uzbek equivalent.
+Keep ids.
 
+Return ONLY JSON.
 
 Format:
 
 {
-  "subtitles":[
-      {
-          "id":1,
-          "translated":"..."
-      }
-  ]
+ "subtitles":[
+   {
+     "id":1,
+     "translated":"..."
+   }
+ ]
 }
 """
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "subtitles": payload
-                        },
-                        ensure_ascii=False
-                    )
-                }
-            ]
-        )
+                    },
 
-        result = json.loads(response.choices[0].message.content)
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "subtitles": context
+                            },
+                            ensure_ascii=False
+                        )
+                    }
+                ]
+            )
 
-        subtitles = result.get("subtitles", [])
-
-        translated = {
-            item["id"]: item["translated"]
-            for item in subtitles
-            if "id" in item and "translated" in item
-}
-
-
-        output = []
-
-        for item in items:
-
-            output.append({
-                "index": item["index"],
-                "text": item["text"],
-                "translated": clean_text(
-                    translated.get(
-                        item["index"],
-                        item["text"]
-                    )
-                ),
-                "start": item["start"],
-                "duration": item["duration"]
-            })
-
-        return output
-
-    except Exception as e:
-
-        print(e)
-
-        return [
-            {
-                "index": item["index"],
-                "text": item["text"],
-                "translated": item["text"],
-                "start": item["start"],
-                "duration": item["duration"]
+            expected_ids = {
+                x["index"]
+                for x in items
             }
-            for item in items
-        ]
 
+            result = parse_translation_response(
+                response.choices[0].message.content,
+                expected_ids
+            )
 
+            translated = {
+                x["id"]: x["translated"]
+                for x in result["subtitles"]
+            }
+
+            output = []
+
+            for item in items:
+
+                output.append({
+
+                    "index": item["index"],
+
+                    "text": item["text"],
+
+                    "translated": clean_text(
+                        translated.get(
+                            item["index"],
+                            item["text"]
+                        )
+                    ),
+
+                    "start": item["start"],
+
+                    "duration": item["duration"]
+                })
+
+            return output
+
+        except Exception as e:
+
+            print("Retry:", attempt + 1, e)
+
+            if attempt < MAX_RETRY - 1:
+
+                time.sleep(1)
+
+                continue
+
+    print("Translation failed.")
+
+    return [
+
+        {
+            "index": item["index"],
+            "text": item["text"],
+            "translated": item["text"],
+            "start": item["start"],
+            "duration": item["duration"]
+        }
+
+        for item in items
+    ]
 # =========================
 
 
-def translate_batch(items):
+async def translate_batch(items, all_items):
 
-    BATCH_SIZE = 10
+    BATCH_SIZE = 8
+    MAX_PARALLEL = 4
 
-    translated = []
+    tasks = []
 
     for i in range(0, len(items), BATCH_SIZE):
 
         batch = items[i:i+BATCH_SIZE]
 
-        translated.extend(
-            translate_batch_once(batch)
+        tasks.append(
+            asyncio.to_thread(
+                translate_batch_once,
+                batch,
+                all_items
+            )
         )
 
-    translated.sort(
-        key=lambda x: x["index"]
-    )
+    translated = []
+
+    for i in range(0, len(tasks), MAX_PARALLEL):
+
+        group = tasks[i:i+MAX_PARALLEL]
+
+        results = await asyncio.gather(
+            *group,
+            return_exceptions=True
+        )
+
+        for result in results:
+
+            if isinstance(result, Exception):
+                print("TRANSLATION TASK ERROR:", result)
+                continue
+
+            translated.extend(result)
+
+    translated.sort(key=lambda x: x["index"])
 
     return translated
 
-# TRANSCRIPT API
-# =========================
+
+
 @app.get("/transcript/{video_id}")
-def get_transcript(
+async def get_transcript(
     video_id: str,
     limit: int = Query(default=40),
     offset: int = Query(default=0),
     nocache: str = Query(default="")
 ):
-
-    # Translation cache
-    cache_key = f"translation:{video_id}:{offset}:{limit}"
-
-    if not nocache:
-        cached = get_cache(cache_key)
-
-        if cached is not None:
-            print("TRANSLATION FROM REDIS")
-            return cached
 
     raw_items = fetch_transcript(video_id)
 
@@ -853,35 +934,30 @@ def get_transcript(
     if not raw_items:
         return []
 
-    chunk = raw_items[
-        offset:offset + limit
-    ]
+    prepared_all = []
+
+    for index, item in enumerate(raw_items):
+
+        prepared_all.append({
+
+            "index": index,
+
+            "text": item["text"],
+
+            "start": item["start"],
+
+            "duration": item["duration"]
+        })
+
+    chunk = prepared_all[offset:offset+limit]
 
     if not chunk:
         return []
 
-    prepared = []
-
-    for absolute_index, item in enumerate(
+    return await translate_batch(
         chunk,
-        start=offset
-    ):
-        prepared.append({
-            "index": absolute_index,
-            "text": item["text"],
-            "start": item["start"],
-            "duration": item["duration"]
-        })
-
-    translated = translate_batch(prepared)
-
-    set_cache(
-        cache_key,
-        translated,
-        TRANSLATION_TTL
+        prepared_all
     )
-
-    return translated
 
 
 
@@ -889,13 +965,6 @@ def get_transcript(
 def get_video_url(video_id: str):
     try:
         import yt_dlp
-
-        cache_key = f"video:{video_id}"
-
-        cached = get_cache(cache_key)
-        if cached is not None:
-            print("VIDEO URL FROM REDIS")
-            return cached
 
         url = f"https://www.youtube.com/watch?v={video_id}"
 
@@ -911,7 +980,10 @@ def get_video_url(video_id: str):
             ydl_opts["proxy"] = proxy_url
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(
+                url,
+                download=False
+            )
 
         if not info:
             return {
@@ -920,20 +992,12 @@ def get_video_url(video_id: str):
                 "thumbnail": ""
             }
 
-        result = {
+        return {
             "video_url": info.get("url", ""),
             "title": info.get("title", ""),
             "thumbnail": info.get("thumbnail", "")
         }
-
-        set_cache(
-            cache_key,
-            result,
-            VIDEO_URL_TTL
-        )
-
-        return result
-
+    
     except Exception as error:
         print("VIDEO URL ERROR:", error)
 
