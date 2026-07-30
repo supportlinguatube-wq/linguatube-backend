@@ -33,6 +33,27 @@ load_dotenv()
 
 app = FastAPI()
 
+# =========================
+# CORS
+# Oldin butunlay yo'q edi. Brauzerdan (web yoki extension) chaqirilsa
+# so'rov CORS xatosi bilan bloklanadi. Mobil ilova uchun ta'siri yo'q.
+# ALLOWED_ORIGINS env: "https://linguatube.uz,https://www.linguatube.uz"
+# =========================
+from fastapi.middleware.cors import CORSMiddleware
+
+_origins = [
+    o.strip()
+    for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")
+    if o.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_origins,
+    allow_credentials=("*" not in _origins),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/version")
@@ -87,6 +108,13 @@ def get_proxy_url(video_id: str = None):
     return proxy_url
 
 def rotate_proxy(video_id: str):
+
+    # BUG EDI: PROXY_URL yo'q bo'lsa urlparse(None) AttributeError beradi.
+    # rotate_proxy generator bo'lgani uchun xato faqat birinchi next() da
+    # otiladi -> proxy sozlanmagan holatda birinchi fetch muvaffaqiyatsiz
+    # bo'lsa, yt-dlp fallback'ga o'tmasdan butun so'rov qulaydi.
+    if not PROXY_URL:
+        return
 
     parsed = urlparse(PROXY_URL)
 
@@ -190,7 +218,23 @@ async def process_video(
     }
 
 
+LANGUAGE_CACHE = {}
+
+
 def detect_video_language(video_id: str, proxy_url: str = None):
+
+    # BUG EDI: bu funksiya fetch_with_youtube_transcript_api ichida chaqiriladi,
+    # u esa proxy-rotation tsiklida 11 martagacha qayta chaqirilishi mumkin.
+    # Har chaqiruvda TO'LIQ yt_dlp.extract_info ketadi -> katta latency.
+    # Endi keshlanadi.
+    if video_id in LANGUAGE_CACHE:
+        return LANGUAGE_CACHE[video_id]
+
+    cache_key = f"lang:{video_id}"
+    cached = get_cache(cache_key)
+    if cached is not None:
+        LANGUAGE_CACHE[video_id] = cached
+        return cached
 
     try:
         import yt_dlp
@@ -216,6 +260,9 @@ def detect_video_language(video_id: str, proxy_url: str = None):
 
         print("VIDEO LANGUAGE:", language)
 
+        LANGUAGE_CACHE[video_id] = language
+        set_cache(cache_key, language, TRANSCRIPT_TTL)
+
         return language
 
     except Exception as e:
@@ -229,8 +276,8 @@ def detect_video_language(video_id: str, proxy_url: str = None):
 
 def fetch_transcript(video_id: str):
 
-    proxy_url = get_proxy_url(video_id)
-
+    # Kesh tekshiruvi PROXY tanlashdan OLDIN bo'lishi kerak — aks holda
+    # har bir kesh-hitda bekorga tasodifiy port band qilinadi va log to'ladi.
     cache_key = f"transcript:{video_id}"
 
     cached = get_cache(cache_key)
@@ -242,6 +289,8 @@ def fetch_transcript(video_id: str):
     if video_id in TRANSCRIPT_CACHE:
         print("TRANSCRIPT FROM MEMORY")
         return TRANSCRIPT_CACHE[video_id]
+
+    proxy_url = get_proxy_url(video_id)
 
     # 1) FIRST: youtube-transcript-api
     items = fetch_with_youtube_transcript_api(video_id, proxy_url)
@@ -848,6 +897,34 @@ def get_transcript(
             "duration": item["duration"]
         })
 
+    # =====================================================================
+    # YANGI PIPELINE — env flag bilan yoqiladi/o'chiriladi
+    # =====================================================================
+    # TRANSLATE_V2=1  -> gap-batch tarjima (sifatli)
+    # o'chirilgan     -> eski translate_batch (bugungi holat, o'zgarmagan)
+    #
+    # Railway'da faqat env o'zgaruvchini almashtirasiz — REDEPLOY KERAK EMAS,
+    # muammo bo'lsa bir zumda qaytarasiz.
+    #
+    # Javob shakli AYNAN bir xil: har bir segment uchun bitta element,
+    # o'sha index / start / duration bilan. Faqat `translated` sifatli bo'ladi.
+    # Shuning uchun App Store'dagi ilovaga tegish KERAK EMAS.
+    if os.getenv("TRANSLATE_V2") in ("1", "true", "yes", "on"):
+        try:
+            from translator import translate_range_strict
+
+            return translate_range_strict(
+                raw_items,
+                offset,
+                limit,
+                video_title=""
+            )
+
+        except Exception as error:
+            # Yangi pipeline qulasa — jim turmaydi, eskisiga qaytadi.
+            # Foydalanuvchi hech narsani sezmaydi.
+            print("V2 TRANSLATE FAILED, FALLING BACK TO V1:", error)
+
     return translate_batch(prepared)
 
 
@@ -1011,3 +1088,18 @@ def translate_word(
 )
 
     return result
+
+
+# =========================
+# V2 ROUTER (yangi tarjima pipeline)
+# =========================
+# Fayl OXIRIDA ulanadi: routes_v2 main dan fetch_transcript/get_video_url ni
+# kech (lazy) import qiladi, shuning uchun aylanma import bo'lmaydi.
+#
+# Eski endpoint'lar (/process, /transcript) O'ZGARMAGAN va ishlab turadi.
+# Yangi: /v2/process, /v2/subtitles, /v2/transcript
+#
+# Muammo chiqsa — pastdagi ikki qatorni izohga olib qo'ying, tamom.
+from routes_v2 import router as v2_router
+
+app.include_router(v2_router)

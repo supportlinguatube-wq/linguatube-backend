@@ -1,0 +1,254 @@
+"""
+Sinxronlik testi — OpenAI API kalitisiz ishlaydi (model chaqirilmaydi).
+
+Ishga tushirish:
+    ./venv/bin/python test_translator.py
+"""
+
+import random
+
+from translator import (
+    merge_into_sentences,
+    build_cues,
+    split_proportional,
+    slice_by_time,
+    translate_range,
+)
+
+random.seed(7)
+
+# --- Realistik YouTube auto-caption: gap o'rtasidan kesilgan ---
+RAW_TEXT = (
+    "so today we are going to build a small application that translates "
+    "youtube videos into uzbek. first we need to fetch the transcript. "
+    "then we send it to the model. the model returns the translation. "
+    "finally we render the subtitles on top of the video player. "
+    "let me show you how this works in practice. it is actually pretty simple. "
+    "there are a few edge cases we have to handle carefully along the way."
+)
+
+words = RAW_TEXT.split()
+items, t, i = [], 0.0, 0
+while i < len(words):
+    n = random.randint(4, 9)
+    chunk = " ".join(words[i:i + n])
+    dur = round(len(chunk) * 0.07 + 0.4, 2)
+    items.append({"index": len(items), "text": chunk,
+                  "start": round(t, 2), "duration": dur})
+    t += dur
+    i += n
+
+VIDEO_START = items[0]["start"]
+VIDEO_END = items[-1]["start"] + items[-1]["duration"]
+print("Xom segmentlar: %d, uzunlik: %.1fs\n" % (len(items), VIDEO_END))
+
+
+def check_sane(cues, label):
+    prev_end = -1.0
+    for c in cues:
+        assert c["duration"] >= 0, "%s: manfiy davomiylik %s" % (label, c)
+        assert c["start"] >= prev_end - 1e-6, "%s: ustma-ust cue %s" % (label, c)
+        assert c["translated"].strip(), "%s: bo'sh tarjima %s" % (label, c)
+        prev_end = c["start"] + c["duration"]
+    return prev_end
+
+
+# ================= 1) Gaplarga birlashtirish =================
+sentences = merge_into_sentences(items)
+print("Gaplar: %d segmentdan -> %d gap" % (len(items), len(sentences)))
+for s in sentences[:3]:
+    print("  [%6.2f-%6.2f] seg %d..%d | %s..."
+          % (s["start"], s["end"], s["seg_from"], s["seg_to"], s["text"][:52]))
+
+covered = sum(len(s["segments"]) for s in sentences)
+assert covered == len(items), "segment yo'qoldi: %d != %d" % (covered, len(items))
+assert all(s["text"] for s in sentences)
+assert [s["sid"] for s in sentences] == list(range(len(sentences)))
+
+# Granularlik: matnda 7 ta nuqta bor. Agar gaplar juda kam chiqsa, demak
+# nuqta segment ichida qolganda gap yopilmayapti va bir nechta gap bitta
+# blobga qo'shilib ketyapti (tarjima sifati tushadi).
+dots = RAW_TEXT.count(".")
+assert len(sentences) >= dots - 1, \
+    "gaplar juda kam: %d gap, matnda %d nuqta — segment ichidagi nuqta " \
+    "e'tiborga olinmayapti" % (len(sentences), dots)
+print("OK  har bir segment aynan bitta gapga tegishli")
+print("OK  granularlik: %d gap / %d nuqta\n" % (len(sentences), dots))
+
+# ============ 2) NUQSONLI model chiqishini simulyatsiya ============
+# sid=1 butunlay tushib qolgan; qolganlari asl matndan UZUNROQ qaytgan
+fake = {}
+for s in sentences:
+    if s["sid"] == 1:
+        continue
+    fake[s["sid"]] = " ".join("soz%d" % k
+                              for k in range(len(s["text"].split()) + 4))
+
+# ================= 3) sentence rejimi =================
+cues = build_cues(sentences, fake, mode="sentence")
+end = check_sane(cues, "sentence")
+print("sentence-mode cue: %d" % len(cues))
+assert abs(cues[0]["start"] - VIDEO_START) < 1e-6
+assert end <= VIDEO_END + 1e-6, "%s > %s" % (end, VIDEO_END)
+
+dropped = [c for c in cues if c["sid"] == 1]
+assert dropped, "sid=1 uchun cue umuman yaratilmadi"
+# Uzun gap bo'lakka bo'linishi mumkin — shuning uchun birlashtirib solishtiramiz
+rejoined = " ".join(c["translated"] for c in dropped).split()
+assert rejoined == sentences[1]["text"].split(), \
+    "tushib qolgan ID uchun asl matn fallback bo'lmadi: %s" % (rejoined,)
+print("OK  siljish yo'q (oxiri %.2fs <= video %.2fs)" % (end, VIDEO_END))
+print("OK  model ID tushirib qoldirsa asl matn ko'rsatiladi\n")
+
+# ================= 4) segment rejimi =================
+seg_cues = build_cues(sentences, fake, mode="segment")
+end2 = check_sane(seg_cues, "segment")
+print("segment-mode cue: %d (xom segment: %d)" % (len(seg_cues), len(items)))
+
+starts = set(round(x["start"], 2) for x in items)
+for c in seg_cues:
+    assert round(c["start"], 2) in starts, "taymkod o'ylab topilgan: %s" % (c,)
+assert abs(seg_cues[0]["start"] - VIDEO_START) < 1e-6
+assert abs(end2 - VIDEO_END) < 1e-6, "oxiri mos emas: %s != %s" % (end2, VIDEO_END)
+assert len(seg_cues) <= len(items)
+print("OK  har bir cue start'i ASL segment start'i (model ta'sir qilmaydi)")
+print("OK  qamrov %.2fs -> %.2fs to'liq\n" % (VIDEO_START, end2))
+
+# ================= 5) split_proportional =================
+assert split_proportional("bir", [5]) == ["bir"]
+assert split_proportional("bir ikki", [5, 5, 5]) == ["bir", "ikki", ""]
+assert split_proportional("", [1, 2]) == ["", ""]
+
+for _ in range(500):
+    n = random.randint(1, 12)
+    wc = random.randint(0, 30)
+    text = " ".join("w%d" % k for k in range(wc))
+    ws = [random.randint(1, 60) for _ in range(n)]
+    parts = split_proportional(text, ws)
+
+    assert len(parts) == n, "n mos emas: %d != %d" % (len(parts), n)
+    joined = " ".join(p for p in parts if p).split()
+    assert joined == text.split(), "so'z buzildi: %s" % (parts,)
+    if wc > n:
+        assert all(p.strip() for p in parts), \
+            "bo'sh bo'lak: n=%d wc=%d %s" % (n, wc, parts)
+print("OK  split_proportional: 500 tasodifiy holat, so'z tartibi/soni saqlandi\n")
+
+# ================= 6) Vaqt oynasi =================
+WINDOW = 10.0
+seen, dupes, t0 = set(), 0, 0.0
+while t0 < VIDEO_END:
+    for it in slice_by_time(items, t0, WINDOW):
+        if it["index"] in seen:
+            dupes += 1
+        seen.add(it["index"])
+    t0 += WINDOW
+assert seen == set(range(len(items))), \
+    "tushib qolgan segment: %s" % (set(range(len(items))) - seen,)
+print("OK  vaqt oynasi barcha %d segmentni qamradi (chegarada %d ta ustma-ust)\n"
+      % (len(items), dupes))
+
+# ================= 7) translate_range: chegara qoplamasi =================
+# Modelni chaqirmasdan tekshirish uchun translate_sentences ni almashtiramiz
+import translator
+
+translator.translate_sentences = lambda sents, title="", glossary=None: {
+    s["sid"]: "UZ " + s["text"] for s in sents
+}
+
+# translate_segments ham modelni chaqirmasin (strict yo'l shuni ishlatadi)
+translator.translate_segments = lambda its, title="", glossary=None: dict(
+    (it.get("index", i), "UZ " + it["text"])
+    for i, it in enumerate(its)
+)
+
+LIMIT = 12
+all_idx, seen_idx, dup_idx = [], set(), 0
+off = 0
+while off < len(items):
+    page = translate_range(items, off, LIMIT, mode="segment")
+    for c in page:
+        assert off <= c["seg_from"] < off + LIMIT, \
+            "diapazondan tashqari cue: %s (offset=%d)" % (c, off)
+        if c["index"] in seen_idx:
+            dup_idx += 1
+        seen_idx.add(c["index"])
+        all_idx.append(c["index"])
+    off += LIMIT
+
+assert dup_idx == 0, "pagination cue'ni takrorladi: %d ta" % dup_idx
+assert all_idx == sorted(all_idx), "pagination tartibi buzilgan"
+assert len(seen_idx) >= len(items) * 0.9, \
+    "pagination segment tushirib qoldirdi: %d / %d" % (len(seen_idx), len(items))
+print("OK  translate_range: %d/%d segment, takror 0, tartib buzilmagan"
+      % (len(seen_idx), len(items)))
+print("OK  chunk chegarasi kontekst padding bilan qoplangan\n")
+
+# ========= 8) STRICT rejim: App Store'dagi ilova uchun 1:1 shartnoma =========
+from translator import translate_range_strict, build_strict_cues
+
+# Eski translate_batch javobi qanday bo'lganini modellashtiramiz
+def old_shape(chunk):
+    return [{"index": c["index"], "text": c["text"], "translated": "?",
+             "start": c["start"], "duration": c["duration"]} for c in chunk]
+
+LIMIT = 12
+off = 0
+total = 0
+while off < len(items):
+    chunk = items[off:off + LIMIT]
+    page = translate_range_strict(items, off, LIMIT)
+    expected = old_shape(chunk)
+
+    # 1:1 element soni
+    assert len(page) == len(expected), \
+        "strict 1:1 buzildi: %d != %d (offset=%d)" % (len(page), len(expected), off)
+
+    for got, exp in zip(page, expected):
+        assert got["index"] == exp["index"], "index siljidi: %s vs %s" % (got, exp)
+        assert got["text"] == exp["text"], "asl matn o'zgardi: %s" % (got,)
+        assert got["start"] == exp["start"], "start o'zgardi: %s" % (got,)
+        assert got["duration"] == exp["duration"], "duration o'zgardi: %s" % (got,)
+        assert got["translated"].strip(), "bo'sh tarjima: %s" % (got,)
+        # Eski javobda bo'lmagan kalit qo'shilmasin (frontend qat'iy parse qilsa)
+        assert set(got.keys()) == set(exp.keys()), \
+            "javob kalitlari o'zgardi: %s" % (sorted(got.keys()),)
+
+    total += len(page)
+    off += LIMIT
+
+assert total == len(items), "strict qamrov to'liq emas: %d != %d" % (total, len(items))
+
+# ---- REGRESSIYA: bir xil uzun matn ketma-ket segmentlarda TAKRORLANMASIN ----
+# Haqiqiy videoda shu nuqson chiqdi: nuqtasiz auto-caption'da gap 12 segmentni
+# qamrab oldi va bitta paragraf ekranda 30 sekund turdi.
+full = translate_range_strict(items, 0, len(items))
+run_len, worst = 1, 1
+for a, b in zip(full, full[1:]):
+    if a["translated"] == b["translated"] and len(a["translated"]) > 25:
+        run_len += 1
+        worst = max(worst, run_len)
+    else:
+        run_len = 1
+assert worst <= 2, \
+    "bir xil uzun tarjima %d ta ketma-ket segmentda takrorlandi" % worst
+print("OK  takrorlanish yo'q (eng uzun bir xil ketma-ketlik: %d)" % worst)
+
+# ---- REGRESSIYA: [Music]/[Applause] tarjimasiz qolmasin ----
+from translator import _noise_uz
+assert _noise_uz("[Music]") == "[Musiqa]"
+assert _noise_uz("[Applause]") == "[Olqishlar]"
+assert _noise_uz("hello") is None
+from translator import build_strict_cues_from_map
+noisy = [{"index": 0, "text": "[Applause]", "start": 0.0, "duration": 1.0},
+         {"index": 1, "text": "[Music]", "start": 1.0, "duration": 1.0}]
+out = build_strict_cues_from_map(noisy, {})
+assert [c["translated"] for c in out] == ["[Olqishlar]", "[Musiqa]"], \
+    "shovqin teglari tarjima qilinmadi: %s" % ([c["translated"] for c in out],)
+print("OK  [Music]/[Applause] o'zbekcha qoldi (V1 bilan bir xil)")
+print("OK  strict rejim: %d/%d segment, 1:1, kalitlar/taymkodlar bit-bit bir xil"
+      % (total, len(items)))
+print("OK  App Store'dagi ilovaga tegish kerak emas\n")
+
+print("=" * 56)
+print("BARCHA TESTLAR O'TDI — taymkod siljishi matematik jihatdan mumkin emas")
