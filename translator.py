@@ -43,7 +43,14 @@ except Exception:  # test / standalone rejimi (redis yo'q)
 # o'tish xarajatni deyarli oshirmaydi.
 TRANSLATE_MODEL = os.getenv("TRANSLATE_MODEL", "gpt-4.1")
 
-BATCH_SIZE = int(os.getenv("TRANSLATE_BATCH_SIZE", "12"))   # bir so'rovda GAP soni
+# XARAJAT: system prompt HAR BIR batch bilan qayta yuboriladi (~1200 token).
+# BATCH_SIZE kichik bo'lsa o'sha prompt ko'p marta to'lanadi:
+#   12 da  -> 504 segment = 42 batch = ~50 000 token faqat prompt uchun
+#   28 da  -> 504 segment = 18 batch = ~22 000 token
+# Ya'ni batch'ni oshirish sifatga tegmasdan promptning ulushini ~2.3x kamaytiradi.
+# Tushib qolgan ID'lar _translate_batch_safe da qayta so'raladi, shuning uchun
+# katta batch xavfsiz.
+BATCH_SIZE = int(os.getenv("TRANSLATE_BATCH_SIZE", "28"))
 MAX_WORKERS = int(os.getenv("TRANSLATE_WORKERS", "4"))      # parallel batch
 CONTEXT_LOOKBACK = 2        # oldingi nechta gap kontekst uchun beriladi
 # AUTO-CAPTION'DA PUNKTUATSIYA YO'Q.
@@ -54,10 +61,29 @@ CONTEXT_LOOKBACK = 2        # oldingi nechta gap kontekst uchun beriladi
 MAX_SENTENCE_CHARS = 200
 MAX_SENTENCE_SEGMENTS = 4   # nuqtasiz kapshnda asosiy tormoz shu
 MAX_SENTENCE_SEC = 10.0
+
+# Segment chegarasi kesganda qoldiq bir segment yetim qolishi mumkin:
+#   [19] EN "that well. But um"  -> UZ ">> Lekin,"
+#   [29] EN "there."             -> UZ "Shu yerda."
+# Bunday bo'lak o'zi ma'nosiz. Shundan qisqa bo'lsa oldingi gapga qo'shiladi.
+MIN_SENTENCE_CHARS = int(os.getenv("MIN_SENTENCE_CHARS", "28"))
 MAX_CUE_SEC = 7.0           # bundan uzoq cue bo'linadi
 MAX_JOIN_GAP = 2.0          # segmentlar orasidagi jimlik (s) -> gap tugadi
 
 _client = None
+
+# Token hisobi — xarajatni o'lchash uchun. compare_v1_v2.py shuni o'qiydi.
+USAGE = {
+    "requests": 0,
+    "prompt_tokens": 0,
+    "cached_tokens": 0,
+    "completion_tokens": 0,
+}
+
+
+def reset_usage():
+    for k in USAGE:
+        USAGE[k] = 0
 
 
 def _openai():
@@ -125,14 +151,24 @@ def _noise_uz(text):
     return NOISE_UZ.get(inner)
 
 
-def merge_into_sentences(items):
+def merge_into_sentences(items, max_segments=None, max_chars=None, max_sec=None):
     """
     items:  [{"index","text","start","duration"}]  — xom kapshn segmentlari
     return: [{"sid","text","start","end","seg_from","seg_to","segments":[...]}]
 
     Har bir gap o'zining asl segmentlarini eslab qoladi — keyin taymkod
     aynan shu segmentlardan qayta tiklanadi.
+
+    Chegaralarni chaqiruvchi belgilashi mumkin (paired rejim ularni pastroq
+    qo'yadi, chunki matn ekranga sig'ishi kerak).
     """
+    if max_segments is None:
+        max_segments = MAX_SENTENCE_SEGMENTS
+    if max_chars is None:
+        max_chars = MAX_SENTENCE_CHARS
+    if max_sec is None:
+        max_sec = MAX_SENTENCE_SEC
+
     sentences = []
     buf = []
 
@@ -178,13 +214,56 @@ def merge_into_sentences(items):
 
         if (_SENT_END.search(text)
                 or _SENT_MID.search(text)
-                or len(buf) >= MAX_SENTENCE_SEGMENTS
-                or span >= MAX_SENTENCE_SEC
-                or joined_len >= MAX_SENTENCE_CHARS):
+                or len(buf) >= max_segments
+                or span >= max_sec
+                or joined_len >= max_chars):
             flush()
 
     flush()
-    return sentences
+    return _absorb_orphans(sentences, max_segments)
+
+
+def _absorb_orphans(sentences, max_segments):
+    """
+    Yetim bo'lakni oldingi gapga qo'shadi.
+
+    Chegara kesganda qoldiq bir segment qolib ketadi va u o'zi ma'nosiz
+    bo'ladi ("there." -> "Shu yerda."). Bunday bo'lak oldingi gapga qo'shiladi,
+    natijada o'sha gap chegaradan bitta ortiq segment oladi (max_segments + 1).
+    Matn sal uzunroq, lekin ekranda yetim qator chiqmaydi.
+    """
+    if len(sentences) < 2:
+        return sentences
+
+    out = [sentences[0]]
+
+    for s in sentences[1:]:
+        prev = out[-1]
+
+        prev_end = prev["end"]
+        gap = s["start"] - prev_end
+
+        mergeable = (
+            len(s["segments"]) == 1
+            and len(s["text"]) < MIN_SENTENCE_CHARS
+            and len(prev["segments"]) < max_segments + 1
+            and gap <= MAX_JOIN_GAP
+        )
+
+        if mergeable:
+            prev["segments"].extend(s["segments"])
+            prev["text"] = _clean(prev["text"] + " " + s["text"])
+            prev["end"] = s["end"]
+            prev["seg_to"] = s["seg_to"]
+        else:
+            out.append(s)
+
+    # sid = ro'yxatdagi o'rni. translate_sentences kontekst uchun
+    # sentences[sid-2:sid] dan foydalanadi, shuning uchun bu shart.
+    for i, s in enumerate(out):
+        s["sid"] = i
+
+    return out
 
 
 # ================================================================
@@ -225,6 +304,26 @@ sensible caption by itself.
   readable Uzbek clause. Reading the lines in order must flow naturally.
 - Do not repeat information already given in an earlier line, and do not pull
   content from the next line.
+
+## NEVER INVENT, NEVER DROP  (hard rule — a wrong subtitle misleads the viewer)
+Translate what is there. Nothing more, nothing less.
+- Do NOT add facts, numbers, times, names or details that are not in the source.
+  WRONG: "interviews are the ones that got them in there"
+      -> "Ulardan biri intervyu chiqishidan besh kun o'tib tanlab olindi."
+         (invented "five days" — nothing like it in the source)
+  RIGHT: "intervyularim ularni o'sha yerga olib kirgan."
+- Do NOT silently drop a clause. If the line contains two parts, both appear.
+  WRONG: "solution to it. I've spent a lot of time"
+      -> "Men bu mavzu haqida ko'p vaqt sarfladim."   (lost "solution to it")
+  RIGHT: "...buning yechimi. Men bunga ko'p vaqt sarfladim."
+- A line may contain the END of one sentence and the START of another. That is
+  normal. Translate both parts in the same order. Do not merge them into one
+  smooth sentence and do not discard the shorter part.
+- If the source itself is garbled or repeats ("eight out of I think I
+  interviewed eight people"), translate it as-is. Do not tidy it up by
+  inventing a cleaner meaning.
+- If you are unsure what a fragment means, translate it literally but
+  grammatically. A plain translation is always better than a confident guess.
 
 ## KEEP CONTENT ON ITS OWN LINE  (do not let meaning drift forward)
 Each id must carry the meaning of ITS OWN source text. Do not postpone part of
@@ -348,6 +447,17 @@ def _call_model(batch, context_text, video_title, glossary):
         temperature=0.3,
         response_format={"type": "json_object"},
     )
+
+    try:
+        usage = response.usage
+        USAGE["requests"] += 1
+        USAGE["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+        USAGE["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details is not None:
+            USAGE["cached_tokens"] += getattr(details, "cached_tokens", 0) or 0
+    except Exception:
+        pass
 
     data = json.loads(response.choices[0].message.content)
 
@@ -777,6 +887,82 @@ def build_strict_cues(items, sentences, translations):
 
     # DIQQAT: strict rejimda _normalize_cues ATAYLAB chaqirilmaydi —
     # taymkodlar eski javob bilan bit-bit bir xil qolishi kerak.
+    return cues
+
+
+# PAIRED rejim chegaralari — env bilan sozlanadi, redeploy kerak emas.
+#
+# Nega 3, 2 emas: 2 segmentda birlik ko'pincha gap yarmida tugaydi, model esa
+# tugallanmagan bo'lakni tarjima qilishga urinib qo'shni cue'dan so'z tortadi
+# yoki yo'q narsani to'qib qo'yadi (test'da "besh kun o'tib" — inglizchada yo'q).
+# 3 segmentda birlik to'liq fikrga yaqinlashadi va bu ehtiyoj kamayadi.
+# Matn uzunroq bo'ladi, shuning uchun UI qutisi cho'zilishi kerak.
+PAIRED_MAX_SEGMENTS = int(os.getenv("PAIRED_MAX_SEGMENTS", "3"))
+PAIRED_MAX_CHARS = int(os.getenv("PAIRED_MAX_CHARS", "160"))
+
+
+def translate_range_paired(items, offset, limit, video_title="",
+                           pad=4, glossary=None):
+    """
+    PAIRED rejim — ingliz va o'zbek matni DOIM bir xil so'zlarni qamraydi.
+
+    Muammo: `text` segment bo'lagi, `translated` esa gap tarjimasi bo'lganda
+    ekranda ikkisi mos kelmaydi:
+        text        = "on this topic, and I've never seen"
+        translated  = "Men bu mavzu haqida ko'p vaqt sarfladim,"
+    Sabab lingvistik — o'zbekcha SOV, kesim oxirida, shuning uchun model
+    to'ldiruvchini qo'shni qatordan tortib olishga majbur.
+
+    Yechim: IKKISI HAM to'liq gap bo'ladi. Gap 2 segmentga cho'zilgan bo'lsa,
+    o'sha 2 cue'da bir xil ingliz-o'zbek juftligi turadi.
+
+    Shartnoma: cue soni, `index`, `start`, `duration` O'ZGARMAYDI.
+    O'zgaradigan yagona maydon — `text` (segment bo'lagi -> to'liq gap).
+    Bu ataylab, chunki moslikni tiklashning boshqa yo'li yo'q.
+    """
+    normalized = _normalize_items(items)
+
+    chunk = normalized[offset:offset + limit]
+    if not chunk:
+        return []
+
+    lo = max(0, offset - pad)
+    hi = min(len(normalized), offset + limit + pad)
+    window = normalized[lo:hi]
+
+    sentences = merge_into_sentences(
+        window,
+        max_segments=PAIRED_MAX_SEGMENTS,
+        max_chars=PAIRED_MAX_CHARS,
+    )
+    translations = translate_sentences(sentences, video_title, glossary)
+
+    # segment indeksi -> (inglizcha gap, o'zbekcha gap)
+    pair_by_seg = {}
+    for s in sentences:
+        uz = _clean(translations.get(s["sid"]) or "") or s["text"]
+        for seg in s["segments"]:
+            pair_by_seg[seg["index"]] = (s["text"], uz)
+
+    cues = []
+    for it in chunk:
+        pair = pair_by_seg.get(it["index"])
+
+        if pair is None:
+            # Gapga kirmagan segment: [Music] va hokazo
+            en = it["text"]
+            uz = _noise_uz(it["text"]) or it["text"]
+        else:
+            en, uz = pair
+
+        cues.append({
+            "index": it["index"],
+            "text": en,
+            "translated": uz,
+            "start": it["start"],
+            "duration": it["duration"],
+        })
+
     return cues
 
 

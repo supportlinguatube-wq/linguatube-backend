@@ -99,10 +99,24 @@ def main():
           % (v1_time, len(prepared)))
 
     # ---------------- V2 (yangi yo'l) ----------------
+    import translator
+    from translator import translate_range_paired
+    translator.reset_usage()
+
+    paired = "--paired" in sys.argv
+
     t0 = time.time()
-    v2 = translate_range_strict(raw, offset, limit)
+    if paired:
+        v2 = translate_range_paired(raw, offset, limit)
+    else:
+        v2 = translate_range_strict(raw, offset, limit)
     v2_time = time.time() - t0
-    print("V2 (gap-batch):          %.1fs" % v2_time)
+    usage = dict(translator.USAGE)
+
+    print("V2 (%s): %.1fs" % ("PAIRED" if paired else "gap-batch", v2_time))
+    if paired:
+        print("   chegara: %d segment / %d belgi"
+              % (translator.PAIRED_MAX_SEGMENTS, translator.PAIRED_MAX_CHARS))
 
     # ================= 1) SHARTNOMA TEKSHIRUVI =================
     print("\n" + "=" * 78)
@@ -119,7 +133,13 @@ def main():
                 problems.append("kalitlar farq qiladi: %s vs %s"
                                 % (sorted(a.keys()), sorted(b.keys())))
                 break
-            for field in ("index", "start", "duration", "text"):
+            # PAIRED rejimda `text` ATAYLAB o'zgaradi (bo'lak -> to'liq gap),
+            # shuning uchun uni tekshirmaymiz. Qolganlari o'zgarmasligi shart.
+            fields = ("index", "start", "duration")
+            if not paired:
+                fields = fields + ("text",)
+
+            for field in fields:
                 if a.get(field) != b.get(field):
                     problems.append("%s farq qiladi (index=%s): %r vs %r"
                                     % (field, a.get("index"), a.get(field),
@@ -134,7 +154,11 @@ def main():
 
     print("OK  element soni:  %d == %d" % (len(v1), len(v2)))
     print("OK  kalitlar:      %s" % sorted(v1[0].keys()))
-    print("OK  index / start / duration / text — bit-bit bir xil")
+    if paired:
+        print("OK  index / start / duration — bit-bit bir xil")
+        print("--  text ATAYLAB o'zgardi (segment bo'lagi -> to'liq gap)")
+    else:
+        print("OK  index / start / duration / text — bit-bit bir xil")
     print("OK  frontend'ga tegish kerak emas")
 
     # ================= 2) SIFAT SOLISHTIRUVI =================
@@ -143,18 +167,86 @@ def main():
     print("=" * 78)
 
     changed = 0
+    longest_en = 0
+    longest_uz = 0
+
     for a, b in zip(v1, v2):
         same = a["translated"].strip() == b["translated"].strip()
         if not same:
             changed += 1
+
+        longest_en = max(longest_en, len(b["text"]))
+        longest_uz = max(longest_uz, len(b["translated"]))
+
         print("\n[%s]  %.2fs" % (a["index"], a["start"]))
-        print("  ASL : %s" % a["text"])
-        print("  V1  : %s" % a["translated"])
-        print("  V2  : %s%s" % (b["translated"], "   (bir xil)" if same else ""))
+        if paired:
+            # Ekranda aynan shu ikki qator yonma-yon turadi — moslikni
+            # shu yerda ko'rasiz. Qavsdagi raqam belgi soni.
+            print("  EN  (%3d): %s" % (len(b["text"]), b["text"]))
+            print("  UZ  (%3d): %s" % (len(b["translated"]), b["translated"]))
+            print("  eski V1  : %s" % a["translated"])
+        else:
+            print("  ASL : %s" % a["text"])
+            print("  V1  : %s" % a["translated"])
+            print("  V2  : %s%s" % (b["translated"],
+                                    "   (bir xil)" if same else ""))
+
+    if paired:
+        print("\n" + "-" * 78)
+        print("ENG UZUN MATN:  ingliz %d belgi,  o'zbek %d belgi"
+              % (longest_en, longest_uz))
+        print("Rasmdagi qutida bir qator ~34 belgi sig'gan, ya'ni taxminan")
+        print("  ingliz %d qator, o'zbek %d qator."
+              % ((longest_en + 33) // 34, (longest_uz + 33) // 34))
+        print("Sig'masa: PAIRED_MAX_CHARS ni tushiring yoki")
+        print("PAIRED_MAX_SEGMENTS=1 qilib moslikni saqlagan holda qisqartiring.")
 
     print("\n" + "=" * 78)
     print("%d / %d qatorda tarjima o'zgardi" % (changed, len(v1)))
     print("Tezlik: V1 %.1fs -> V2 %.1fs" % (v1_time, v2_time))
+
+    # ================= 3) XARAJAT =================
+    print("\n" + "=" * 78)
+    print("V2 TOKEN HISOBI  (model: %s, batch: %d)"
+          % (translator.TRANSLATE_MODEL, translator.BATCH_SIZE))
+    print("=" * 78)
+
+    span = 0.0
+    if v2:
+        span = (v2[-1]["start"] + v2[-1]["duration"]) - v2[0]["start"]
+    minutes = max(span / 60.0, 0.001)
+
+    fresh = usage["prompt_tokens"] - usage["cached_tokens"]
+
+    print("So'rovlar:            %d" % usage["requests"])
+    print("Kirish (prompt):      %d token" % usage["prompt_tokens"])
+    print("  shundan keshlangan: %d token (arzon)" % usage["cached_tokens"])
+    print("  yangi:              %d token" % fresh)
+    print("Chiqish:              %d token" % usage["completion_tokens"])
+    print("Video davomiyligi:    %.1f daqiqa" % minutes)
+    print("-" * 78)
+    print("DAQIQAGA:  %.0f kirish + %.0f chiqish token"
+          % (usage["prompt_tokens"] / minutes,
+             usage["completion_tokens"] / minutes))
+
+    # Narxni env dan olamiz — OpenAI narxlari o'zgaradi, shuning uchun
+    # qat'iy raqam yozib qo'ymaymiz. Joriy narxni platform.openai.com/pricing
+    # dan qarab, 1M token uchun dollarda kiriting.
+    p_in = float(os.getenv("PRICE_IN_PER_M", "0") or 0)
+    p_out = float(os.getenv("PRICE_OUT_PER_M", "0") or 0)
+
+    if p_in or p_out:
+        cost = (usage["prompt_tokens"] / 1e6) * p_in \
+            + (usage["completion_tokens"] / 1e6) * p_out
+        print("-" * 78)
+        print("Bu bo'lak:   $%.5f" % cost)
+        print("Daqiqaga:    $%.5f" % (cost / minutes))
+        print("1 soat video: $%.3f" % (cost / minutes * 60))
+    else:
+        print("\nNarxni ko'rish uchun (1M token uchun dollarda):")
+        print("  PRICE_IN_PER_M=2 PRICE_OUT_PER_M=8 \\")
+        print("    ./venv/bin/python compare_v1_v2.py %s %d" % (video_id, limit))
+
     print("=" * 78)
     print("\nV2 sifati yaxshiroq bo'lsa: Railway -> Variables -> TRANSLATE_V2=1")
     return 0

@@ -911,6 +911,20 @@ def get_transcript(
     # Shuning uchun App Store'dagi ilovaga tegish KERAK EMAS.
     if os.getenv("TRANSLATE_V2") in ("1", "true", "yes", "on"):
         try:
+            # TRANSLATE_PAIRED=1 -> `text` va `translated` ikkisi ham to'liq gap
+            # bo'ladi, ya'ni ekranda ingliz va o'zbek matni DOIM mos keladi.
+            # O'chirilgan bo'lsa har segment alohida tarjima qilinadi (moslik
+            # buzilishi mumkin, lekin `text` asl segment bo'lagi bo'lib qoladi).
+            if os.getenv("TRANSLATE_PAIRED") in ("1", "true", "yes", "on"):
+                from translator import translate_range_paired
+
+                return translate_range_paired(
+                    raw_items,
+                    offset,
+                    limit,
+                    video_title=""
+                )
+
             from translator import translate_range_strict
 
             return translate_range_strict(

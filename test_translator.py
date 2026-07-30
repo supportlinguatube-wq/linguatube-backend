@@ -250,5 +250,85 @@ print("OK  strict rejim: %d/%d segment, 1:1, kalitlar/taymkodlar bit-bit bir xil
       % (total, len(items)))
 print("OK  App Store'dagi ilovaga tegish kerak emas\n")
 
+# ========= 9) PAIRED rejim: ingliz va o'zbek DOIM mos kelishi =========
+from translator import translate_range_paired
+import translator as _t
+
+# Model chaqirilmasin: gap tarjimasi = "UZ " + gap matni
+_t.translate_sentences = lambda sents, title="", glossary=None: dict(
+    (s["sid"], "UZ " + s["text"]) for s in sents
+)
+
+LIMIT = 12
+off = 0
+total = 0
+while off < len(items):
+    chunk = items[off:off + LIMIT]
+    page = translate_range_paired(items, off, LIMIT)
+
+    assert len(page) == len(chunk), \
+        "paired 1:1 buzildi: %d != %d (offset=%d)" % (len(page), len(chunk), off)
+
+    for got, raw in zip(page, chunk):
+        # Shartnoma: index/start/duration tegilmaydi
+        assert got["index"] == raw["index"], "index siljidi: %s" % (got,)
+        assert got["start"] == raw["start"], "start o'zgardi: %s" % (got,)
+        assert got["duration"] == raw["duration"], "duration o'zgardi: %s" % (got,)
+        assert set(got.keys()) == {"index", "text", "translated",
+                                  "start", "duration"}, \
+            "kalitlar o'zgardi: %s" % (sorted(got.keys()),)
+
+        # ENG MUHIMI: o'zbekcha aynan ko'rsatilgan inglizchaning tarjimasi
+        # bo'lishi kerak. Bizning stub "UZ " + EN qaytaradi, shuning uchun
+        # moslikni to'g'ridan-to'g'ri tekshirib ko'ramiz.
+        assert got["translated"] == "UZ " + got["text"], \
+            "ingliz va o'zbek mos kelmadi!\n  EN: %s\n  UZ: %s" \
+            % (got["text"], got["translated"])
+
+        # `text` endi segment bo'lagi emas, to'liq gap — asl bo'lakni O'Z ICHIGA
+        # olishi shart (aks holda boshqa gapning matni tushib qolgan)
+        assert raw["text"] in got["text"], \
+            "cue matni o'z segmentini qamramaydi:\n  segment: %s\n  cue: %s" \
+            % (raw["text"], got["text"])
+
+    total += len(page)
+    off += LIMIT
+
+assert total == len(items), "paired qamrov: %d != %d" % (total, len(items))
+print("OK  paired: %d/%d segment, 1:1, taymkodlar o'zgarmagan" % (total, len(items)))
+print("OK  paired: har cue'da ingliz va o'zbek AYNAN bir xil so'zlarni qamraydi")
+
+# Uzunlik chegarasi haqiqatan ushlab turilganini tekshiramiz
+full = translate_range_paired(items, 0, len(items))
+worst_en = max(len(c["text"]) for c in full)
+limit_chars = _t.PAIRED_MAX_CHARS
+assert worst_en <= limit_chars + 60, \
+    "gap chegaradan juda oshib ketdi: %d belgi (chegara %d)" \
+    % (worst_en, limit_chars)
+print("OK  paired: eng uzun inglizcha matn %d belgi (chegara %d)"
+      % (worst_en, limit_chars))
+
+# Segment chegarasi haqiqatan ushlanyaptimi
+runs = {}
+for c in full:
+    runs[c["text"]] = runs.get(c["text"], 0) + 1
+worst_run = max(runs.values())
+# +1: yetim bo'lak oldingi gapga qo'shilganda chegaradan bitta oshadi
+assert worst_run <= _t.PAIRED_MAX_SEGMENTS + 1, \
+    "bir gap %d segmentga cho'zildi (chegara %d + 1)" \
+    % (worst_run, _t.PAIRED_MAX_SEGMENTS)
+print("OK  paired: eng uzun gap %d segment (chegara %d + yetim qoldiq)"
+      % (worst_run, _t.PAIRED_MAX_SEGMENTS))
+
+# Yetim qator qolmasligi kerak: juda qisqa matnli cue bo'lmasin
+shorts = [c for c in full
+          if len(c["text"]) < _t.MIN_SENTENCE_CHARS and c["text"].strip()]
+# Videoning eng oxiridagi qoldiqni qo'shib bo'lmaydi, shuning uchun 1 ta maqbul
+assert len(shorts) <= 1, \
+    "yetim qatorlar qoldi (%d ta): %s" \
+    % (len(shorts), [c["text"] for c in shorts][:4])
+print("OK  paired: yetim bo'lak oldingi gapga qo'shildi (%d ta qoldi)\n"
+      % len(shorts))
+
 print("=" * 56)
 print("BARCHA TESTLAR O'TDI — taymkod siljishi matematik jihatdan mumkin emas")
