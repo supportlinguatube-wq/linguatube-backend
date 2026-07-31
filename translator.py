@@ -290,9 +290,27 @@ Return ONLY valid JSON:
   so -> "Xo'sh", well -> "Mayli", right -> "To'g'ri", okay -> "Yaxshi",
   oh -> "Ha", what -> "Nima", hi -> "Salom".
 
+## CLAUSE FRAGMENTS ARE NORMAL — TRANSLATE THEM AS FRAGMENTS
+Some lines end with a comma instead of a full stop. That means the speaker
+was still mid-sentence and the line was cut at a CLAUSE boundary.
+- Translate such a line as a clause, ending it with a comma too.
+- Do NOT finish the thought for the speaker. Do NOT borrow the ending from
+  the next line. Do NOT turn a clause into a complete sentence.
+- Consecutive lines must read naturally when placed one after another.
+
+  WRONG (fragment turned into a finished sentence, next line's content pulled in):
+    "it came from, uh, it just came from paranoia,"
+      -> "Bu paranoyadan kelib chiqqan va men sakkiz kishini intervyu qilganman."
+  RIGHT (fragment stays a fragment):
+    "it came from, uh, it just came from paranoia,"
+      -> "bu, aslida, shunchaki paranoyadan kelib chiqqan,"
+
+A line ending in a full stop is a complete thought — translate it as a complete
+sentence. A line ending in a comma is a fragment — keep it a fragment.
+
 ## EACH LINE MUST STAND ALONE  (most important quality rule)
-The viewer sees one line at a time. Every line must read as a complete,
-sensible caption by itself.
+The viewer sees one line at a time. A line ending in a full stop must read as a
+complete, sensible caption by itself.
 - NEVER output a dangling fragment such as "tilayman. Rahmat," or "ona." or
   "uyda Amerika prezidenti bilan". Such a caption is unusable.
 - If the source line is a short complete utterance ("thanks mom", "bye dad",
@@ -911,6 +929,114 @@ PAIRED_SPLIT = os.getenv("PAIRED_SPLIT", "1") not in ("0", "false", "no", "off")
 # Nuqta / undov / so'roq — ortidan bo'shliq yoki matn oxiri kelsa chegara
 _BOUNDARY = re.compile(u"[.!?…؟。！？][\"'’”)\\]]*(?=\\s|$)")
 
+# RESTORE_PUNCT=0 -> punktuatsiya tiklash o'chadi, bugungi holat qoladi
+RESTORE_PUNCT = os.getenv("RESTORE_PUNCT", "1") not in ("0", "false", "no", "off")
+
+# Ketma-ket ikki nuqta orasidagi eng katta masofa shundan oshsa,
+# punktuatsiya tiklanadi.
+#
+# Oldin bu "o'rtacha zichlik" edi va NOTO'G'RI ishladi: oynada bir nechta
+# nuqta bo'lsa o'rtacha yetarli chiqardi, lekin bitta joyda 153 belgi
+# davomida nuqta bo'lmasdi — muammo aynan o'sha yerda edi. O'rtacha bilan
+# lokal muammoni topib bo'lmaydi.
+PUNCT_MAX_RUN = int(os.getenv("PUNCT_MAX_RUN", "110"))
+
+
+def _longest_unpunctuated_run(text):
+    """Ketma-ket ikki gap chegarasi orasidagi eng uzun masofa (belgi)."""
+    last = 0
+    worst = 0
+    for m in _BOUNDARY.finditer(text):
+        worst = max(worst, m.end() - last)
+        last = m.end()
+    return max(worst, len(text) - last)
+
+_WORD_ONLY = re.compile(u"[^\\w']+", re.UNICODE)
+
+
+def _norm_word(w):
+    return _WORD_ONLY.sub("", w).lower()
+
+
+PUNCT_SYSTEM = """You restore punctuation in raw speech-recognition text.
+
+Return ONLY JSON: {"text":"<the same words, with punctuation>"}
+
+HARD RULES — breaking these makes the output unusable:
+- Keep EVERY word exactly as given, in the same order. Never add a word, never
+  remove a word, never reorder, never correct spelling, never translate.
+- Keep filler and repetition exactly where it is (uh, um, you know, I mean,
+  repeated words). Do not tidy the speech up.
+- You may ONLY add punctuation ( . , ? ! - ) and change capitalisation.
+
+HOW TO SPLIT:
+- Put a full stop wherever a thought is COMPLETE, even if the speaker rambles
+  on without pausing. Prefer MORE sentence breaks over fewer.
+- Each resulting sentence must stand on its own and read as a complete thought,
+  because each one will be shown alone on screen as a subtitle.
+- Separate filler and false starts with commas so they do not swallow the
+  sentence boundary.
+"""
+
+
+def restore_punctuation(text):
+    """
+    Nuqtasiz ASR matniga tinish belgilarini qo'yadi. So'zlar o'zgarmasligi
+    KAFOLATLANADI — chiqish so'zma-so'z tekshiriladi, farq bo'lsa asl matn
+    qaytariladi. Ya'ni yomonlashish mumkin emas.
+    """
+    if not text.strip():
+        return text
+
+    key = "uz:punct:v1:" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:20]
+    cached = get_cache(key)
+    if cached:
+        return cached
+
+    try:
+        response = _openai().chat.completions.create(
+            model=TRANSLATE_MODEL,
+            messages=[
+                {"role": "system", "content": PUNCT_SYSTEM},
+                {"role": "user", "content": text},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+
+        try:
+            usage = response.usage
+            USAGE["requests"] += 1
+            USAGE["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+            USAGE["completion_tokens"] += getattr(
+                usage, "completion_tokens", 0) or 0
+        except Exception:
+            pass
+
+        data = json.loads(response.choices[0].message.content)
+        out = _clean(data.get("text") or "")
+
+    except Exception as error:
+        print("PUNCT RESTORE ERROR:", error)
+        return text
+
+    # NAZORAT: so'zlar aynan o'sha bo'lishi shart
+    src = text.split()
+    dst = out.split()
+
+    if len(src) != len(dst):
+        print("PUNCT REJECTED: so'z soni farq qildi (%d -> %d)"
+              % (len(src), len(dst)))
+        return text
+
+    for a, b in zip(src, dst):
+        if _norm_word(a) != _norm_word(b):
+            print("PUNCT REJECTED: so'z o'zgardi (%r -> %r)" % (a, b))
+            return text
+
+    set_cache(key, out, TRANSLATION_TTL)
+    return out
+
 
 def build_sentence_units(items, max_chars, max_segments):
     """
@@ -933,16 +1059,46 @@ def build_sentence_units(items, max_chars, max_segments):
     if not speech:
         return []
 
-    chunks = []
-    owner = []          # owner[i] = i-belgi qaysi segment indeksidan kelgan
+    # SO'Z darajasida yig'amiz — punktuatsiya tiklansa ham moslik buzilmasin.
+    # (Belgi darajasida yig'sak, qo'shilgan tinish belgilari xaritani suradi.)
+    words = []
+    owner_of_word = []
 
     for it in speech:
-        t = it["text"].strip()
+        for w in it["text"].split():
+            words.append(w)
+            owner_of_word.append(it["index"])
+
+    if not words:
+        return []
+
+    plain = " ".join(words)
+
+    # Tinish belgilari yetarlimi? Yetmasa modeldan tiklashni so'raymiz.
+    # Punktuatsiyali videolarda bu so'rov UMUMAN ketmaydi.
+    if RESTORE_PUNCT:
+        run = _longest_unpunctuated_run(plain)
+
+        if run > PUNCT_MAX_RUN:
+            print("PUNCT: eng uzun nuqtasiz bo'lak %d belgi (chegara %d)"
+                  " -> tiklanmoqda" % (run, PUNCT_MAX_RUN))
+            fixed = restore_punctuation(plain)
+            fixed_words = fixed.split()
+
+            # restore_punctuation allaqachon tekshiradi, bu ikkinchi to'siq
+            if len(fixed_words) == len(words):
+                words = fixed_words
+
+    # Endi belgi darajasidagi xarita, so'z egaligidan qurilgan
+    chunks = []
+    owner = []
+
+    for i, w in enumerate(words):
         if chunks:
             chunks.append(" ")
-            owner.append(it["index"])
-        chunks.append(t)
-        owner.extend([it["index"]] * len(t))
+            owner.append(owner_of_word[i])
+        chunks.append(w)
+        owner.extend([owner_of_word[i]] * len(w))
 
     full = "".join(chunks)
 
@@ -961,11 +1117,29 @@ def build_sentence_units(items, max_chars, max_segments):
             continue
 
         while cut - start > max_chars:
-            brk = full.rfind(" ", start, start + max_chars)
+            # Nuqta yo'q. Ma'no birligi buzilmasin deb VERGULDA kesamiz —
+            # vergul ergash gap chegarasi. Punktuatsiya tiklash bosqichi
+            # aynan shu vergullarni ishonchli qilib beradi.
+            # Tartib: nuqta -> vergul -> bo'shliq.
+            limit = min(start + max_chars, cut)
+            brk = -1
+
+            for sep in (", ", "; ", ": ", " — ", " - "):
+                p = full.rfind(sep, start, limit)
+                if p > brk:
+                    # ajratgich CHAP bo'lakda qoladi
+                    brk = p + len(sep) - 1
+
             if brk <= start:
-                brk = start + max_chars
-            spans.append((start, brk))
-            start = brk + 1 if brk < len(full) and full[brk] == " " else brk
+                brk = full.rfind(" ", start, limit)
+            if brk <= start:
+                brk = limit
+
+            spans.append((start, brk + 1 if full[brk:brk + 1] not in ("", " ")
+                          else brk))
+            start = brk
+            while start < len(full) and full[start] == " ":
+                start += 1
 
         spans.append((start, cut))
         start = cut
@@ -1006,13 +1180,20 @@ def build_sentence_units(items, max_chars, max_segments):
 
         units.append({"text": text, "segments": segs})
 
-    # 5) Segment chegarasi zaxira to'siq sifatida
+    # 5) Yetim dumni oldingi birlikka qo'shamiz.
+    #    Vergulda kesganda gapning oxirgi bo'lagi yolg'iz qolishi mumkin
+    #    ("administration.", "there.") — u ekranda ma'nosiz, va model uni
+    #    ko'rib turib oldingi birlikda fikrni tugatib qo'yadi, natijada
+    #    mazmun takrorlanadi.
     final = []
     for u in units:
-        if not u["segments"]:
-            if final:
-                final[-1]["text"] = _clean(final[-1]["text"] + " " + u["text"])
+        too_short = len(u["text"]) < MIN_SENTENCE_CHARS
+
+        if final and (not u["segments"] or too_short):
+            final[-1]["text"] = _clean(final[-1]["text"] + " " + u["text"])
+            final[-1]["segments"].extend(u["segments"])
             continue
+
         final.append(u)
 
     for i, u in enumerate(final):

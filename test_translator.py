@@ -373,6 +373,111 @@ assert not bad, \
 
 print("OK  build_sentence_units: %d segment -> %d birlik, so'z yo'qolmadi"
       % (len(items), len(units)))
+
+# ---- Trigger: LOKAL uzun nuqtasiz bo'lak ushlanishi shart ----
+import translator as _tr
+
+# Bu matnda 4 ta nuqta bor (o'rtacha zichlik "yetarli" ko'rinadi), lekin
+# oxirida 150+ belgi davomida bitta ham nuqta yo'q. Eski o'rtacha-zichlik
+# sharti buni O'TKAZIB YUBORARDI.
+tricky = ("Short one. Another one. Third here. Fourth done. " +
+          "and then he kept talking for a very long time without any "
+          "punctuation at all which is exactly the case that used to break "
+          "the splitter completely")
+run = _tr._longest_unpunctuated_run(tricky)
+assert run > _tr.PUNCT_MAX_RUN, \
+    "uzun nuqtasiz bo'lak ushlanmadi: %d <= %d" % (run, _tr.PUNCT_MAX_RUN)
+
+# Toza matnda esa ishga tushmasligi kerak (bekorga pul sarflamaslik uchun)
+clean = "Short one. Another one. Third here. Fourth done. Fifth as well."
+assert _tr._longest_unpunctuated_run(clean) <= _tr.PUNCT_MAX_RUN, \
+    "toza matnda bekorga tiklash ishga tushardi"
+print("OK  trigger: lokal uzun bo'lak ushlandi (%d belgi), toza matn o'tkazildi"
+      % run)
+
+# ---- Zaxira kesish VERGULDA bo'lsin, so'z o'rtasida emas ----
+_tr.RESTORE_PUNCT = False           # model chaqirilmasin
+long_words = ("But, um, you know, it came from, uh, it just came from "
+              "paranoia, you know, and I mean, I think I last time I checked "
+              "eight out of, I think I interviewed eight people")
+segs = []
+t = 0.0
+for w in long_words.split():
+    segs.append({"index": len(segs), "text": w, "start": t, "duration": 1.0})
+    t += 1.0
+
+u3 = build_sentence_units(segs, 60, 3)
+assert len(u3) > 1, "uzun nuqtasiz matn umuman bo'linmadi"
+
+# Har bir bo'lak (oxirgisidan tashqari) vergul yoki nuqtada tugashi kerak
+bad_cut = [u["text"] for u in u3[:-1]
+           if not u["text"].rstrip().endswith((",", ".", ";", ":", "?", "!"))]
+assert not bad_cut, \
+    "bo'lak ma'no chegarasida emas, so'z o'rtasida kesilgan:\n  %s" % (bad_cut[0],)
+
+# So'zlar baribir yo'qolmasligi kerak
+assert " ".join(u["text"] for u in u3).split() == long_words.split(), \
+    "vergulda kesishda so'z buzildi"
+print("OK  zaxira kesish VERGULDA: %d bo'lak, hammasi ma'no chegarasida"
+      % len(u3))
+
+# ---- Yetim dum ("administration.", "there.") yolg'iz qolmasin ----
+tail = ("I think I last time I checked eight out of I think I interviewed "
+        "eight people that got picked up for the administration.")
+segs2 = []
+t = 0.0
+for w in tail.split():
+    segs2.append({"index": len(segs2), "text": w, "start": t, "duration": 1.0})
+    t += 1.0
+
+u4 = build_sentence_units(segs2, 100, 3)
+orphans = [u["text"] for u in u4[1:]
+           if len(u["text"]) < _tr.MIN_SENTENCE_CHARS]
+assert not orphans, "yetim dum qoldi: %s" % (orphans,)
+
+# Yetim qo'shilganda segmentlari ham ko'chishi shart, aks holda tushib qoladi
+covered = sorted(s["index"] for u in u4 for s in u["segments"])
+assert covered == list(range(len(segs2))), \
+    "yetim qo'shilganda segment yo'qoldi: %d / %d" % (len(covered), len(segs2))
+print("OK  yetim dum oldingi birlikka qo'shildi, segment yo'qolmadi (%d bo'lak)"
+      % len(u4))
+_tr.RESTORE_PUNCT = True
+
+_calls = {"n": 0}
+
+
+def _fake_punct(good):
+    def inner(text):
+        _calls["n"] += 1
+        return good(text)
+    return inner
+
+
+orig_restore = _tr.restore_punctuation
+
+# 1) To'g'ri xatti-harakat: faqat tinish belgisi qo'shilgan -> qabul qilinsin
+_tr.restore_punctuation = _fake_punct(
+    lambda t: ". ".join(t.split(" and ")) if " and " in t else t + ".")
+noperiod = [{"index": i, "text": t, "start": i * 2.0, "duration": 2.0}
+            for i, t in enumerate(
+                ["so today we are going", "to build a small app",
+                 "and it translates videos", "into uzbek for people"])]
+u2 = build_sentence_units(noperiod, 200, 4)
+w_in = " ".join(x["text"] for x in noperiod).split()
+w_out = " ".join(u["text"] for u in u2).split()
+assert [_tr._norm_word(w) for w in w_out] == [_tr._norm_word(w) for w in w_in], \
+    "punktuatsiyadan keyin so'zlar buzildi:\n  %s\n  %s" % (w_out, w_in)
+print("OK  punktuatsiya tiklandi, so'zlar o'zgarmadi (%d chaqiruv)"
+      % _calls["n"])
+
+# 2) Buzuq xatti-harakat: model so'z qo'shsa/o'zgartirsa -> RAD ETILSIN
+_tr.restore_punctuation = orig_restore  # haqiqiy tekshiruvli versiya
+_tr._openai = lambda: (_ for _ in ()).throw(RuntimeError("model yo'q"))
+assert _tr.restore_punctuation("bir ikki uch") == "bir ikki uch", \
+    "model qulasa asl matn qaytarilmadi"
+print("OK  model qulasa asl matn qaytariladi (yomonlashish mumkin emas)")
+
+_tr.restore_punctuation = orig_restore
 print("OK  birliklar NUQTADA tugaydi (qoldiq keyingisiga o'tadi)")
 print("OK  eng uzun birlik %d belgi\n" % max(len(u["text"]) for u in units))
 
