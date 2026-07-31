@@ -901,6 +901,127 @@ PAIRED_MAX_SEGMENTS = int(os.getenv("PAIRED_MAX_SEGMENTS", "3"))
 PAIRED_MAX_CHARS = int(os.getenv("PAIRED_MAX_CHARS", "160"))
 
 
+# PAIRED_SPLIT=0 qo'ysangiz eski birlashtirish qaytadi (nuqtada kesish o'chadi).
+# Ya'ni qaytarish uchun uch qavat bor:
+#   PAIRED_SPLIT=0        -> faqat yangi kesishni o'chiradi
+#   TRANSLATE_PAIRED o'chir -> butun paired rejimni o'chiradi
+#   TRANSLATE_V2 o'chir     -> butunlay eski kodga qaytadi
+PAIRED_SPLIT = os.getenv("PAIRED_SPLIT", "1") not in ("0", "false", "no", "off")
+
+# Nuqta / undov / so'roq — ortidan bo'shliq yoki matn oxiri kelsa chegara
+_BOUNDARY = re.compile(u"[.!?…؟。！？][\"'’”)\\]]*(?=\\s|$)")
+
+
+def build_sentence_units(items, max_chars, max_segments):
+    """
+    Matnni NUQTADA kesadi, cue'ni esa segment darajasida qoldiradi.
+
+    Muammo shu edi: nuqta segment o'rtasida bo'lsa, qoldiq ham birlikka
+    kirib kelardi ("...vouch for any man again. Uh,") va birlik ma'no
+    jihatdan tugallanmasdi. Model esa tugallanmagan fikrni ko'rib keyingi
+    gapdan tortib olardi — tarjima oldinga ketardi.
+
+    Endi segmentlar matni uzluksiz qatorga birlashtiriladi, har bir belgi
+    qaysi segmentdan kelgani eslab qolinadi, keyin matn nuqtada kesiladi.
+    Segment ikki gapga tegib qolsa, belgilar KO'PCHILIGI qaysi gapda bo'lsa
+    o'shanisiga biriktiriladi.
+
+    return: [{"sid","text","segments":[...]}]
+    """
+    speech = [it for it in items
+              if it["text"].strip() and not _NOISE.match(it["text"].strip())]
+    if not speech:
+        return []
+
+    chunks = []
+    owner = []          # owner[i] = i-belgi qaysi segment indeksidan kelgan
+
+    for it in speech:
+        t = it["text"].strip()
+        if chunks:
+            chunks.append(" ")
+            owner.append(it["index"])
+        chunks.append(t)
+        owner.extend([it["index"]] * len(t))
+
+    full = "".join(chunks)
+
+    # 1) Nuqtalar bo'yicha kesish nuqtalari
+    cuts = [m.end() for m in _BOUNDARY.finditer(full)]
+    if not cuts or cuts[-1] < len(full):
+        cuts.append(len(full))
+
+    # 2) Oraliqlar. Juda uzun bo'lsa (punktuatsiyasiz kapshn) so'z chegarasida
+    #    qo'shimcha kesamiz — bu faqat zaxira to'siq.
+    spans = []
+    start = 0
+
+    for cut in cuts:
+        if cut <= start:
+            continue
+
+        while cut - start > max_chars:
+            brk = full.rfind(" ", start, start + max_chars)
+            if brk <= start:
+                brk = start + max_chars
+            spans.append((start, brk))
+            start = brk + 1 if brk < len(full) and full[brk] == " " else brk
+
+        spans.append((start, cut))
+        start = cut
+        while start < len(full) and full[start] == " ":
+            start += 1
+
+    # 3) Har bir segmentni belgilar ko'pchiligiga qarab bir oraliqqa biriktiramiz
+    tally = {}
+    for i, (a, b) in enumerate(spans):
+        for pos in range(a, b):
+            key = (owner[pos], i)
+            tally[key] = tally.get(key, 0) + 1
+
+    best = {}
+    for (seg_index, span_i), n in tally.items():
+        cur = best.get(seg_index)
+        if cur is None or n > cur[1]:
+            best[seg_index] = (span_i, n)
+
+    segs_of_span = {}
+    for it in speech:
+        pick = best.get(it["index"])
+        if pick is None:
+            continue
+        segs_of_span.setdefault(pick[0], []).append(it)
+
+    # 4) Segment tegmagan oraliqni oldingisiga qo'shib yuboramiz
+    units = []
+    for i, (a, b) in enumerate(spans):
+        text = full[a:b].strip()
+        if not text:
+            continue
+        segs = segs_of_span.get(i, [])
+
+        if not segs and units:
+            units[-1]["text"] = _clean(units[-1]["text"] + " " + text)
+            continue
+
+        units.append({"text": text, "segments": segs})
+
+    # 5) Segment chegarasi zaxira to'siq sifatida
+    final = []
+    for u in units:
+        if not u["segments"]:
+            if final:
+                final[-1]["text"] = _clean(final[-1]["text"] + " " + u["text"])
+            continue
+        final.append(u)
+
+    for i, u in enumerate(final):
+        u["sid"] = i
+        u["segments"].sort(key=lambda s: s["index"])
+
+    return final
+
+
 def translate_range_paired(items, offset, limit, video_title="",
                            pad=4, glossary=None):
     """
@@ -930,11 +1051,21 @@ def translate_range_paired(items, offset, limit, video_title="",
     hi = min(len(normalized), offset + limit + pad)
     window = normalized[lo:hi]
 
-    sentences = merge_into_sentences(
-        window,
-        max_segments=PAIRED_MAX_SEGMENTS,
-        max_chars=PAIRED_MAX_CHARS,
-    )
+    if PAIRED_SPLIT:
+        # Matn nuqtada kesiladi -> har bir birlik ma'no jihatdan tugal
+        sentences = build_sentence_units(
+            window, PAIRED_MAX_CHARS, PAIRED_MAX_SEGMENTS)
+    else:
+        # Eski yo'l: segment darajasida birlashtirish (PAIRED_SPLIT=0)
+        sentences = merge_into_sentences(
+            window,
+            max_segments=PAIRED_MAX_SEGMENTS,
+            max_chars=PAIRED_MAX_CHARS,
+        )
+
+    if not sentences:
+        return build_strict_cues_from_map(chunk, {})
+
     translations = translate_sentences(sentences, video_title, glossary)
 
     # segment indeksi -> (inglizcha gap, o'zbekcha gap)

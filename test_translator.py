@@ -330,5 +330,51 @@ assert len(shorts) <= 1, \
 print("OK  paired: yetim bo'lak oldingi gapga qo'shildi (%d ta qoldi)\n"
       % len(shorts))
 
+# ===== 10) build_sentence_units: matn nuqtada kesilsin, belgi yo'qolmasin =====
+from translator import build_sentence_units
+
+units = build_sentence_units(items, _t.PAIRED_MAX_CHARS, _t.PAIRED_MAX_SEGMENTS)
+
+# Har bir segment aynan bitta birlikka tegishli bo'lishi shart
+seen_segs = []
+for u in units:
+    for s in u["segments"]:
+        seen_segs.append(s["index"])
+assert len(seen_segs) == len(set(seen_segs)), "segment ikki birlikka tushdi"
+assert set(seen_segs) == set(i["index"] for i in items), \
+    "segment yo'qoldi yoki ortiqcha: %s" % (
+        set(i["index"] for i in items) ^ set(seen_segs),)
+
+# Bo'sh birlik bo'lmasin, sid tartibi to'g'ri bo'lsin
+assert all(u["text"].strip() for u in units), "bo'sh birlik bor"
+assert [u["sid"] for u in units] == list(range(len(units))), "sid tartibi buzuq"
+
+# Birliklar matni birlashtirilganda asl so'zlar saqlanishi kerak
+joined = " ".join(u["text"] for u in units).split()
+original = " ".join(i["text"] for i in items).split()
+assert joined == original, \
+    "so'z yo'qoldi yoki qo'shildi:\n  bor: %s\n  kutilgan: %s" \
+    % (joined[:12], original[:12])
+
+# ENG MUHIMI: birlik nuqtadan keyingi qoldiq bilan tugamasin
+# ("...again. Uh," kabi — aynan shu tarjimani oldinga surib yuborgan)
+bad = []
+for u in units[:-1]:
+    t = u["text"].rstrip()
+    if not t:
+        continue
+    # ichida nuqta bo'lsa, u matnning OXIRIDA bo'lishi kerak
+    hits = list(_t._BOUNDARY.finditer(t))
+    if hits and hits[-1].end() < len(t):
+        bad.append(t)
+assert not bad, \
+    "birlik nuqtadan keyin davom etyapti (%d ta):\n  %s" \
+    % (len(bad), bad[0])
+
+print("OK  build_sentence_units: %d segment -> %d birlik, so'z yo'qolmadi"
+      % (len(items), len(units)))
+print("OK  birliklar NUQTADA tugaydi (qoldiq keyingisiga o'tadi)")
+print("OK  eng uzun birlik %d belgi\n" % max(len(u["text"]) for u in units))
+
 print("=" * 56)
 print("BARCHA TESTLAR O'TDI — taymkod siljishi matematik jihatdan mumkin emas")

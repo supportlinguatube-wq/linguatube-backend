@@ -60,11 +60,20 @@ def main():
         return 1
 
     video_id = sys.argv[1]
-    limit = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+    limit = 10
+    for a in sys.argv[2:]:
+        if not a.startswith("-"):
+            limit = int(a)
+            break
+
+    # --offset N : muammo videoning o'rtasida bo'lsa aynan o'sha joyni tekshirish.
+    # Bu yo'q edi va aynan shu sababli 50-soniyadan keyingi buzilishni ko'rmaganman.
     offset = 0
+    if "--offset" in sys.argv:
+        offset = int(sys.argv[sys.argv.index("--offset") + 1])
 
     print("=" * 78)
-    print("VIDEO:", video_id, "| limit:", limit)
+    print("VIDEO: %s | limit: %d | offset: %d" % (video_id, limit, offset))
     print("=" * 78)
 
     refresh = "--refresh" in sys.argv
@@ -81,6 +90,10 @@ def main():
     print("Xom segmentlar:", len(raw))
 
     chunk = raw[offset:offset + limit]
+    if not chunk:
+        print("XATO: offset=%d da segment yo'q (jami %d)" % (offset, len(raw)))
+        return 1
+
     prepared = [
         {
             "index": offset + i,
