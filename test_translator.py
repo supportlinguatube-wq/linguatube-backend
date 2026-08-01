@@ -68,12 +68,24 @@ assert [s["sid"] for s in sentences] == list(range(len(sentences)))
 # Granularlik: matnda 7 ta nuqta bor. Agar gaplar juda kam chiqsa, demak
 # nuqta segment ichida qolganda gap yopilmayapti va bir nechta gap bitta
 # blobga qo'shilib ketyapti (tarjima sifati tushadi).
+#
+# Chegara "nuqtalar - 1" emas, chunki keyinroq _absorb_orphans qo'shildi:
+# juda qisqa gaplar (< MIN_SENTENCE_CHARS) oldingisiga qo'shiladi va gaplar
+# soni tabiiy ravishda kamayadi. Bu ataylab qilingan.
+#
+# Tekshiruvning maqsadi boshqacha edi va o'sha maqsad saqlanadi: nuqta
+# segment ICHIDA qolganda gap umuman yopilmay, hamma narsa bitta blobga
+# aylanib qolgan holatni ushlash (o'shanda 13 segment -> 2 gap edi).
+#
 dots = RAW_TEXT.count(".")
-assert len(sentences) >= dots - 1, \
+min_expected = max(2, dots // 2)
+
+assert len(sentences) >= min_expected, \
     "gaplar juda kam: %d gap, matnda %d nuqta — segment ichidagi nuqta " \
     "e'tiborga olinmayapti" % (len(sentences), dots)
 print("OK  har bir segment aynan bitta gapga tegishli")
-print("OK  granularlik: %d gap / %d nuqta\n" % (len(sentences), dots))
+print("OK  granularlik: %d gap / %d nuqta (kamida %d kutilgan)\n"
+      % (len(sentences), dots, min_expected))
 
 # ============ 2) NUQSONLI model chiqishini simulyatsiya ============
 # sid=1 butunlay tushib qolgan; qolganlari asl matndan UZUNROQ qaytgan
@@ -285,11 +297,19 @@ while off < len(items):
             "ingliz va o'zbek mos kelmadi!\n  EN: %s\n  UZ: %s" \
             % (got["text"], got["translated"])
 
-        # `text` endi segment bo'lagi emas, to'liq gap — asl bo'lakni O'Z ICHIGA
-        # olishi shart (aks holda boshqa gapning matni tushib qolgan)
-        assert raw["text"] in got["text"], \
-            "cue matni o'z segmentini qamramaydi:\n  segment: %s\n  cue: %s" \
-            % (raw["text"], got["text"])
+        # Cue matni segmentni TO'LIQ qamrashi endi SHART EMAS: matn nuqtada
+        # kesiladi, ya'ni nuqta segment o'rtasida bo'lsa segmentning dumi
+        # keyingi birlikka o'tadi. Aynan shuni xohlagandik.
+        #
+        # Lekin cue segment bilan kamida bitta so'zni bo'lishishi SHART —
+        # aks holda cue butunlay boshqa gapni ko'rsatyapti, ya'ni segmentga
+        # biriktirish bir qadam surilgan. Ilovada aynan shu buzilish edi.
+        seg_words = set(w.lower().strip(".,!?") for w in raw["text"].split())
+        cue_words = set(w.lower().strip(".,!?") for w in got["text"].split())
+
+        assert seg_words & cue_words, \
+            "cue segmentga umuman aloqador emas (biriktirish siljigan):" \
+            "\n  segment: %s\n  cue: %s" % (raw["text"], got["text"])
 
     total += len(page)
     off += LIMIT
@@ -458,15 +478,26 @@ orig_restore = _tr.restore_punctuation
 # 1) To'g'ri xatti-harakat: faqat tinish belgisi qo'shilgan -> qabul qilinsin
 _tr.restore_punctuation = _fake_punct(
     lambda t: ". ".join(t.split(" and ")) if " and " in t else t + ".")
+# Matn PUNCT_MAX_RUN dan UZUN bo'lishi shart, aks holda trigger ishlamaydi
+# va test o'zi tekshirmoqchi bo'lgan kodni umuman ishga tushirmaydi
+# (avval shunday edi: "0 chaqiruv" bilan o'tib ketardi).
 noperiod = [{"index": i, "text": t, "start": i * 2.0, "duration": 2.0}
             for i, t in enumerate(
-                ["so today we are going", "to build a small app",
-                 "and it translates videos", "into uzbek for people"])]
-u2 = build_sentence_units(noperiod, 200, 4)
+                ["so today we are going", "to build a small application",
+                 "and it translates youtube videos", "into uzbek for people",
+                 "who want to learn english", "and improve their listening",
+                 "skills every single day"])]
+_plain = " ".join(x["text"] for x in noperiod)
+assert len(_plain) > _tr.PUNCT_MAX_RUN, \
+    "sinov matni juda qisqa (%d), trigger ishlamaydi" % len(_plain)
+
+u2 = build_sentence_units(noperiod, 200, 8)
 w_in = " ".join(x["text"] for x in noperiod).split()
 w_out = " ".join(u["text"] for u in u2).split()
 assert [_tr._norm_word(w) for w in w_out] == [_tr._norm_word(w) for w in w_in], \
     "punktuatsiyadan keyin so'zlar buzildi:\n  %s\n  %s" % (w_out, w_in)
+assert _calls["n"] > 0, \
+    "punktuatsiya tiklash CHAQIRILMADI — test bo'sh o'tdi"
 print("OK  punktuatsiya tiklandi, so'zlar o'zgarmadi (%d chaqiruv)"
       % _calls["n"])
 

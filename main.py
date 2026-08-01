@@ -1,8 +1,9 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Header
 from youtube_transcript_api import YouTubeTranscriptApi
 from openai import OpenAI
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
+from auth import require_access
 from cache import (
     get_cache,
     set_cache,
@@ -185,7 +186,8 @@ def clean_text(text: str) -> str:
 async def process_video(
     video_id: str,
     limit: int = Query(default=40),
-    offset: int = Query(default=0)
+    offset: int = Query(default=0),
+    authorization: str = Header(default=None)
 ):
 
     loop = asyncio.get_running_loop()
@@ -196,7 +198,8 @@ async def process_video(
             video_id,
             limit,
             offset,
-            ""
+            "",
+            authorization
         )
     )
 
@@ -859,8 +862,13 @@ def get_transcript(
     video_id: str,
     limit: int = Query(default=40),
     offset: int = Query(default=0),
-    nocache: str = Query(default="")
+    nocache: str = Query(default=""),
+    authorization: str = Header(default=None)
 ):
+
+    # REQUIRE_AUTH o'chiq bo'lsa hech kimni rad etmaydi, faqat log yozadi.
+    # Yangi ilova tarqalgach Railway'da REQUIRE_AUTH=1 qo'yasiz.
+    require_access(authorization)
 
     raw_items = fetch_transcript(video_id)
 
@@ -1005,8 +1013,11 @@ def get_video_url(video_id: str):
 
 @app.get("/translate-word")
 def translate_word(
-    word: str
+    word: str,
+    authorization: str = Header(default=None)
 ):
+
+    require_access(authorization)
 
     word = clean_text(word)
     cache_key = f"word:{word.strip().lower()}"
