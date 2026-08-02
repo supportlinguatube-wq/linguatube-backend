@@ -147,14 +147,43 @@ def get_balance_seconds(uid):
         return None
 
 
-def require_access(authorization):
+UPDATE_NOTICE_UZ = "Ilovani App Store'da yangilang"
+UPDATE_NOTICE_EN = "Please update LinguaTube in the App Store"
+
+
+def update_notice_subtitles():
+    """
+    ESKI ilovalar uchun "yangilang" xabari.
+
+    Nega 401 emas: App Store'dagi eski versiya [TranscriptItem] massivini
+    kutadi. 401 qaytarsak dekodlash yiqiladi va yuklanish yozuvi ABADIY
+    aylanaveradi — foydalanuvchi sababini bilmaydi va ilova buzilgan deb
+    o'ylaydi.
+
+    Shuning uchun bitta soxta subtitr qaytaramiz. Eski ilova uni oddiy
+    subtitr deb ekranga chiqaradi va foydalanuvchi nima qilish kerakligini
+    ko'radi. Yangi ilova bu holatga hech qachon tushmaydi.
+    """
+    return [{
+        "index": 0,
+        "text": UPDATE_NOTICE_EN,
+        "translated": UPDATE_NOTICE_UZ,
+        "start": 0.0,
+        "duration": 99999.0
+    }]
+
+
+def check_access(authorization):
     """
     Har bir qimmat endpoint boshida chaqiriladi.
 
-    REQUIRE_AUTH o'chiq bo'lsa hech kimni rad etmaydi — faqat log yozadi,
-    shunda yangi ilova qanchalik tarqalganini o'lchay olasiz.
+    Qaytaradi: (uid, sabab)
+        sabab None      -> o'tkaziladi
+        sabab "auth"    -> propusk yo'q, ESKI ilova (yangilash xabari)
+        sabab "balance" -> vaqti tugagan, YANGI ilova (xato xabari)
 
-    Qaytaradi: uid yoki None.
+    REQUIRE_AUTH o'chiq bo'lsa hech kim rad etilmaydi — faqat log yoziladi,
+    shunda yangi ilova qanchalik tarqalganini o'lchay olasiz.
     """
     uid = verify_uid(authorization)
 
@@ -162,17 +191,14 @@ def require_access(authorization):
         print("AUTH: token yo'q yoki yaroqsiz")
 
         if REQUIRE_AUTH:
-            raise HTTPException(
-                status_code=401,
-                detail="Ilovaga kirish talab qilinadi."
-            )
+            return None, "auth"
 
-        return None
+        return None, None
 
     print("AUTH: token bor uid=%s" % uid)
 
     if not REQUIRE_BALANCE:
-        return uid
+        return uid, None
 
     balance = get_balance_seconds(uid)
 
@@ -180,9 +206,26 @@ def require_access(authorization):
         # Yozuv topilmadi. Yangi foydalanuvchini bloklamaymiz — bepul vaqt
         # hali Firestore'ga yozilmagan bo'lishi mumkin.
         print("AUTH: balans yozuvi yo'q, o'tkazildi uid=%s" % uid)
-        return uid
+        return uid, None
 
     if balance <= 0:
+        print("AUTH: balans tugagan uid=%s" % uid)
+        return uid, "balance"
+
+    return uid, None
+
+
+def require_access(authorization):
+    """Massiv qaytarmaydigan endpointlar uchun — xato bilan to'xtatadi."""
+    uid, reason = check_access(authorization)
+
+    if reason == "auth":
+        raise HTTPException(
+            status_code=401,
+            detail=UPDATE_NOTICE_UZ
+        )
+
+    if reason == "balance":
         raise HTTPException(
             status_code=402,
             detail="Vaqtingiz tugagan. Iltimos, vaqt sotib oling."

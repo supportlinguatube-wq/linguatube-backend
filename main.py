@@ -3,7 +3,12 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from openai import OpenAI
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
-from auth import require_access
+from auth import (
+    require_access,
+    check_access,
+    update_notice_subtitles,
+    UPDATE_NOTICE_UZ,
+)
 from cache import (
     get_cache,
     set_cache,
@@ -920,7 +925,18 @@ def get_transcript(
 
     # REQUIRE_AUTH o'chiq bo'lsa hech kimni rad etmaydi, faqat log yozadi.
     # Yangi ilova tarqalgach Railway'da REQUIRE_AUTH=1 qo'yasiz.
-    require_access(authorization)
+    _uid, blocked = check_access(authorization)
+
+    if blocked == "auth":
+        # Eski ilova — 401 ni tushunmaydi, subtitr ko'rinishida xabar beramiz
+        return update_notice_subtitles()
+
+    if blocked == "balance":
+        # Yangi ilova — {"error": true, ...} shaklini biladi va chiroyli chiqaradi
+        return {
+            "error": True,
+            "message": "Vaqtingiz tugagan. Iltimos, vaqt sotib oling."
+        }
 
     raw_items = fetch_transcript(video_id)
 
@@ -1069,7 +1085,17 @@ def translate_word(
     authorization: str = Header(default=None)
 ):
 
-    require_access(authorization)
+    # So'z tarjimasi massiv emas — bu yerda ham eski ilova tushunadigan
+    # shaklda javob beramiz, xato o'rniga xabarni tarjima sifatida.
+    _uid, blocked = check_access(authorization)
+
+    if blocked:
+        return {
+            "word": word,
+            "translated": UPDATE_NOTICE_UZ
+            if blocked == "auth"
+            else "Vaqtingiz tugagan"
+        }
 
     word = clean_text(word)
     cache_key = f"word:{word.strip().lower()}"
