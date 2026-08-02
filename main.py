@@ -296,15 +296,20 @@ def fetch_transcript(video_id: str):
     proxy_url = get_proxy_url(video_id)
 
     # 1) FIRST: youtube-transcript-api
-    items = fetch_with_youtube_transcript_api(video_id, proxy_url)
+    items, permanent = fetch_with_youtube_transcript_api(video_id, proxy_url)
 
-    if not items:
+    # Xato YAKUNIY bo'lsa (subtitr o'chirilgan, video yo'q) proxy almashtirish
+    # foydasiz — darhol to'xtaymiz. Faqat IP bloki kabi vaqtinchalik
+    # nosozliklarda qayta uriniladi.
+    if not items and not permanent:
 
         for proxy_url in rotate_proxy(video_id):
 
-            items = fetch_with_youtube_transcript_api(video_id, proxy_url)
+            items, permanent = fetch_with_youtube_transcript_api(
+                video_id, proxy_url
+            )
 
-            if items:
+            if items or permanent:
 
                 break
 
@@ -321,9 +326,13 @@ def fetch_transcript(video_id: str):
         return items
 
     # 2) SECOND: yt-dlp fallback
+    #
+    # Yakuniy xatoda ham BIR MARTA uriniladi — youtube-transcript-api
+    # ba'zan topolmagan subtitrni yt-dlp topadi. Lekin proxy aylantirish
+    # qilinmaydi, chunki YouTube "subtitr o'chirilgan" deb aytgan.
     items = fetch_with_ytdlp_subtitles(video_id, proxy_url)
 
-    if not items:
+    if not items and not permanent:
         for proxy_url in rotate_proxy(video_id):
 
             items = fetch_with_ytdlp_subtitles(video_id, proxy_url)
@@ -511,7 +520,46 @@ def fetch_with_ytdlp_subtitles(video_id: str, proxy_url: str = None):
 #         api = YouTubeTranscriptApi()
 
 #         transcript_list = api.list(video_id)
+def is_permanent_transcript_error(error) -> bool:
+    """
+    Xato YAKUNIYmi (qayta urinish foydasiz) yoki VAQTINCHALIKmi?
+
+    Yakuniy: subtitr o'chirilgan, transkript yo'q, video mavjud emas.
+             Proxy almashtirish bularni hech qachon o'zgartirmaydi.
+
+    Vaqtinchalik: IP bloki, tarmoq nosozligi. Boshqa IP yordam berishi mumkin.
+
+    Ilgari ikkalasi bir xil ko'rilardi va subtitri o'chirilgan videoda
+    ~22 marta bekorga urinilardi — javob juda kech kelardi.
+    """
+    name = type(error).__name__
+    text = str(error).lower()
+
+    permanent_names = (
+        "TranscriptsDisabled",
+        "NoTranscriptFound",
+        "NoTranscriptAvailable",
+        "VideoUnavailable",
+        "VideoUnplayable",
+    )
+
+    if name in permanent_names:
+        return True
+
+    markers = (
+        "subtitles are disabled",
+        "no transcripts were found",
+        "transcripts are disabled",
+        "video is no longer available",
+        "video unavailable",
+        "is unplayable",
+    )
+
+    return any(marker in text for marker in markers)
+
+
 def fetch_with_youtube_transcript_api(video_id: str, proxy_url: str = None):
+    """return: (items, permanent_failure)"""
 
     try:
         if proxy_url:
@@ -618,7 +666,8 @@ def fetch_with_youtube_transcript_api(video_id: str, proxy_url: str = None):
                 )
 
             except Exception:
-                return []
+                # Ro'yxat bo'sh — bu videoda subtitr yo'q. Yakuniy javob.
+                return [], True
 
         raw = selected.fetch()
 
@@ -644,16 +693,19 @@ def fetch_with_youtube_transcript_api(video_id: str, proxy_url: str = None):
             len(items)
         )
 
-        return items
+        return items, False
 
     except Exception as error:
 
+        permanent = is_permanent_transcript_error(error)
+
         print(
-            "YOUTUBE TRANSCRIPT API ERROR:",
+            "YOUTUBE TRANSCRIPT API ERROR (%s):"
+            % ("YAKUNIY" if permanent else "vaqtinchalik"),
             error
         )
 
-        return [] 
+        return [], permanent
 
 def fetch_with_whisper(video_id: str):
 
