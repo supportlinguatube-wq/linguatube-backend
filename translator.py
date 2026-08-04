@@ -138,7 +138,10 @@ NOISE_UZ = {
     "karsak": u"[Olqishlar]",
     "аплодисменты": u"[Olqishlar]",
     "拍手": u"[Olqishlar]",
-    "laughter": u"[Kulgi]",
+    # Kulgi uchun matn emas, emoji — ekranda tabiiyroq ko'rinadi
+    "laughter": u"😅😅",
+    "laughs": u"😅😅",
+    "laughing": u"😅😅",
     "inaudible": u"[Tushunarsiz]",
 }
 
