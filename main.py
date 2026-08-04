@@ -218,6 +218,28 @@ async def process_video(
         video_future
     )
 
+    # get_transcript subtitr topolmasa {"error": ..., "message": ...} qaytaradi.
+    # Uni "subtitles" maydoniga solib yuborsak, javob shakli buziladi:
+    # Android Gson ro'yxat kutadi va obyektni o'qiy olmay xato beradi,
+    # foydalanuvchi esa hech qanday xabar ko'rmaydi.
+    #
+    # Shuning uchun xatoni YUQORI darajada, ro'yxatni esa bo'sh qaytaramiz.
+    # Eski ilova ham buni muammosiz o'qiydi (ortiqcha maydonlarni e'tiborsiz
+    # qoldiradi), yangisi esa "error" ni ko'rib xabar chiqaradi.
+    if isinstance(subtitles, dict):
+
+        return {
+            "video_url": video["video_url"],
+            "title": video["title"],
+            "thumbnail": video["thumbnail"],
+            "subtitles": [],
+            "error": True,
+            "message": subtitles.get(
+                "message",
+                "Bu videoda subtitle mavjud emas."
+            )
+        }
+
     return {
         "video_url": video["video_url"],
         "title": video["title"],
