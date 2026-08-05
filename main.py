@@ -1047,7 +1047,16 @@ def get_transcript(
     #      ham asraydi.
     page_key = "page:v1:%s:%d:%d" % (video_id, offset, limit)
 
-    force_fresh = nocache not in ("", "0", "false", "no")
+    # DIQQAT: bu ATAYLAB "ruxsat ro'yxati", ya'ni faqat aniq qiymatlar
+    # keshni chetlab o'tadi.
+    #
+    # iOS ilovasi har bir so'rovga `nocache=<tasodifiy UUID>` qo'shib
+    # yuboradi — bu URLSession'ning O'Z HTTP keshini chetlab o'tish uchun,
+    # serverga aloqasi yo'q. Oldin `nocache` umuman ishlatilmasdi va
+    # zararsiz edi. "bo'sh bo'lmasa — chetlab o't" degan mantiq esa har
+    # bir iOS so'rovini eng qimmat yo'lga solib yuborardi: sahifa keshi
+    # ham, single-flight ham ishlamay qolardi.
+    force_fresh = str(nocache).strip().lower() in ("1", "true", "yes", "on")
 
     if not force_fresh:
 
