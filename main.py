@@ -15,7 +15,18 @@ from cache import (
     TRANSCRIPT_TTL,
     TRANSLATION_TTL,
     VIDEO_URL_TTL,
-    WORD_TTL
+    WORD_TTL,
+    PAGE_TTL
+)
+from redis_manager import redis_client
+from concurrency import (
+    cold_slot,
+    single_flight,
+    work_pool,
+    load_stats,
+    ServerBusy,
+    MAX_COLD,
+    WORK_THREADS
 )
 
 
@@ -62,10 +73,44 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def _raise_thread_limit():
+    """Starlette sinxron endpoint'larni thread pulida ishlatadi.
+
+    Standart sig'im — 40. Bu kam: single-flight kutuvchilari ham thread
+    egallaydi, holbuki ular deyarli hech narsa qilmaydi (uxlaydi).
+    40 ta kutuvchi to'planishi bilan KESHDAN o'qiydigan so'rovlar ham
+    navbatga tushib qolardi.
+
+    Haqiqiy og'ir ishni bu son emas, MAX_COLD cheklaydi.
+    """
+    try:
+        import anyio
+
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        limiter.total_tokens = WORK_THREADS
+
+        print(
+            "THREADS: sync limit=%d, og'ir ish limiti=%d"
+            % (WORK_THREADS, MAX_COLD)
+        )
+
+    except Exception as error:
+        print("THREAD LIMIT SET ERROR:", error)
+
+
 @app.get("/version")
 def get_version():
     return {
-        "youtube_transcript_api": version("youtube-transcript-api")
+        "youtube_transcript_api": version("youtube-transcript-api"),
+        # Yuk holati. Railway'da tekshirish uchun:
+        #   busy      -> navbat to'lib rad etilgan so'rovlar
+        #   waited    -> navbatda kutgan so'rovlar
+        #   followers -> boshqa birov qilayotgan ishni kutganlar
+        "load": load_stats(),
+        # Redis o'chib qolsa kesh JIMGINA ishlamay qo'yadi va hamma
+        # narsa qaytadan tarjima qilinadi. Shu yerdan ko'rinadi.
+        "redis": redis_client is not None
     }
 
 client = OpenAI(
@@ -192,13 +237,23 @@ async def process_video(
     video_id: str,
     limit: int = Query(default=40),
     offset: int = Query(default=0),
+    # skip_video=1 -> video havolasini OLMAYMIZ.
+    #
+    # Android YouTube pleyeriga o'tganda oqim havolasi kerak emas. U esa
+    # yt-dlp orqali olinadi va 5-20 sekund ketadi — video ochilishidagi
+    # asosiy kechikish shundan. Bu parametr yo'q bo'lsa avvalgidek ishlaydi,
+    # ya'ni eski ilovalar buzilmaydi.
+    skip_video: int = Query(default=0),
     authorization: str = Header(default=None)
 ):
 
     loop = asyncio.get_running_loop()
 
+    # work_pool, `None` emas: standart executor min(32, cpu+4) thread
+    # beradi va u butun jarayon uchun umumiy. Single-flight kutuvchilari
+    # ham thread egallagani uchun bu son katta bo'lishi kerak.
     transcript_future = loop.run_in_executor(
-        None,
+        work_pool,
         lambda: get_transcript(
             video_id,
             limit,
@@ -208,15 +263,28 @@ async def process_video(
         )
     )
 
-    video_future = loop.run_in_executor(
-        None,
-        lambda: get_video_url(video_id)
-    )
+    if skip_video:
 
-    subtitles, video = await asyncio.gather(
-        transcript_future,
-        video_future
-    )
+        # yt-dlp umuman chaqirilmaydi — eng katta kechikish shu edi
+        subtitles = await transcript_future
+
+        video = {
+            "video_url": "",
+            "title": "",
+            "thumbnail": ""
+        }
+
+    else:
+
+        video_future = loop.run_in_executor(
+            work_pool,
+            lambda: get_video_url(video_id)
+        )
+
+        subtitles, video = await asyncio.gather(
+            transcript_future,
+            video_future
+        )
 
     # get_transcript subtitr topolmasa {"error": ..., "message": ...} qaytaradi.
     # Uni "subtitles" maydoniga solib yuborsak, javob shakli buziladi:
@@ -959,6 +1027,73 @@ def get_transcript(
             "error": True,
             "message": "Vaqtingiz tugagan. Iltimos, vaqt sotib oling."
         }
+
+    # =====================================================================
+    # SAHIFA KESHI + SINGLE FLIGHT + ADMISSION CONTROL
+    # =====================================================================
+    #
+    # Uch qatlam, uchtasi uch xil muammoni yechadi:
+    #
+    #   1. Sahifa keshi — tayyor javob. Oldin har bir sahifa so'rovi
+    #      BUTUN transkriptni Redis'dan yechib, keyin 40 tasini kesib
+    #      olardi: 3 soatlik videoning 8-sahifasi uchun ham bir necha MB
+    #      JSON qayta parse qilinardi.
+    #
+    #   2. single_flight — bir xil videoni ochgan 30 kishidan faqat
+    #      bittasi ishlaydi, qolganlari tayyor natijani kutadi.
+    #
+    #   3. cold_slot — 100 kishi HAR XIL video ochsa, bir vaqtda faqat
+    #      MAX_COLD tasi ishlaydi. Bu OpenAI limitini ham, thread'larni
+    #      ham asraydi.
+    page_key = "page:v1:%s:%d:%d" % (video_id, offset, limit)
+
+    force_fresh = nocache not in ("", "0", "false", "no")
+
+    if not force_fresh:
+
+        cached_page = get_cache(page_key)
+
+        if cached_page is not None:
+            return cached_page
+
+    def produce():
+        # Og'ir ishni FAQAT yetakchi bajaradi, ya'ni joyni ham faqat u
+        # egallaydi. Kutuvchilar limitni behuda band qilmaydi.
+        with cold_slot():
+            return _build_transcript_page(video_id, limit, offset)
+
+    def cacheable(result):
+        # Faqat haqiqiy natija keshlanadi.
+        #
+        # Bo'sh ro'yxat yoki {"error": ...} vaqtinchalik nosozlik
+        # bo'lishi mumkin — uni 3 kunga yozib qo'ysak, video keyin
+        # tuzalgan bo'lsa ham foydalanuvchi eski xatoni ko'raveradi.
+        return isinstance(result, list) and len(result) > 0
+
+    try:
+
+        if force_fresh:
+            return produce()
+
+        return single_flight(
+            result_key=page_key,
+            ttl=PAGE_TTL,
+            produce=produce,
+            cacheable=cacheable
+        )
+
+    except ServerBusy:
+
+        # Osilib qolgandan ko'ra toza xabar yaxshi. Android buni
+        # allaqachon tushunadi — `error` maydonini o'qiydi.
+        return {
+            "error": True,
+            "message": "Server hozir band. Bir necha soniyadan keyin qayta urinib ko'ring."
+        }
+
+
+def _build_transcript_page(video_id: str, limit: int, offset: int):
+    """Keshda yo'q sahifani noldan quradi — eng qimmat yo'l."""
 
     raw_items = fetch_transcript(video_id)
 

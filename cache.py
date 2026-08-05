@@ -8,6 +8,13 @@ from redis_manager import redis_client
 CACHE_DEBUG = os.getenv("CACHE_DEBUG") in ("1", "true", "yes", "on")
 
 TRANSCRIPT_TTL = 60 * 60 * 24 * 7
+
+# Tayyor, tarjima qilingan SAHIFA. Xom transkriptdan farqi shu: uni
+# qaytarish uchun hech narsa hisoblash kerak emas.
+#
+# Muddati qisqaroq (3 kun), chunki bular eng katta yozuvlar. Muddati
+# o'tsa ham qayta qurish arzon — har bir gap alohida 30 kun keshda.
+PAGE_TTL = 60 * 60 * 24 * 3
 TRANSLATION_TTL = 60 * 60 * 24 * 30
 VIDEO_URL_TTL = 60 * 60 * 6
 WORD_TTL = 60 * 60 * 24 * 30
