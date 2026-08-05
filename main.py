@@ -318,6 +318,12 @@ async def process_video(
 
 LANGUAGE_CACHE = {}
 
+# PREFER_MANUAL_SUBS=0 -> eski tartib qaytadi (avval avtomatik subtitr).
+# Muammo chiqsa Railway'da env almashtirasiz, redeploy kerak emas.
+PREFER_MANUAL_SUBS = os.getenv(
+    "PREFER_MANUAL_SUBS", "1"
+) not in ("0", "false", "no", "off")
+
 
 def detect_video_language(video_id: str, proxy_url: str = None):
 
@@ -709,36 +715,50 @@ def fetch_with_youtube_transcript_api(video_id: str, proxy_url: str = None):
             "ja"
         ]
 
-        # 1) Avval AUTO-GENERATED subtitle tanlaymiz
+        # =============================================================
+        # SUBTITR TREKINI TANLASH
+        # =============================================================
+        #
+        # OLDIN: avval AUTO-GENERATED, topilmasa MANUAL.
+        # ENDI  : avval MANUAL, topilmasa AUTO.
+        #
+        # Nima uchun. Avtomatik subtitrda tinish belgisi UMUMAN yo'q.
+        # O'lchov (pZH7toJjGcc, o'sha videoning ikkala treki):
+        #
+        #     qo'lda yozilgan : 117 ta vergul, 433 ta bosh harf
+        #     avtomatik       :   0 ta vergul, 238 ta bosh harf
+        #
+        # Tinish belgisi bo'lmasa build_sentence_units gap chegarasini
+        # topa olmaydi va matnni 160 belgida MEXANIK kesadi. Natijada
+        # birlik doim gap o'rtasida uziladi ("...people know about my",
+        # "...Arabic is the"), model esa bo'lak-jumlani ko'rib fikrni
+        # o'zicha tugatib qo'yadi — o'zbekcha tarjima inglizchadan
+        # 4-11 sekund oldinga ketadi.
+        #
+        # Qo'lda yozilgan trek bo'lsa bu zanjir umuman boshlanmaydi.
+        # Ustiga restore_punctuation chaqiruvi ham kerak bo'lmaydi,
+        # ya'ni har sahifada bitta OpenAI so'rovi tejaladi.
+        #
+        # TIL USTUVORLIGI SAQLANADI: til tashqi tsiklda, manual/auto
+        # esa ichkarida. Ya'ni ruscha qo'lda yozilgani inglizcha
+        # avtomatikdan ustun kelib qolmaydi.
+        finders = [
+            ("MANUAL", transcript_list.find_manually_created_transcript),
+            ("AUTO", transcript_list.find_generated_transcript),
+        ]
+
+        if not PREFER_MANUAL_SUBS:
+            finders.reverse()
+
         for lang in preferred_order:
 
-            try:
-                selected = transcript_list.find_generated_transcript(
-                    [lang]
-                )
-
-                print(
-                    "AUTO SUBTITLE:",
-                    selected.language_code
-                )
-
-                break
-
-            except Exception:
-                pass
-
-        # 2) Auto topilmasa, MANUAL subtitle tanlaymiz
-        if selected is None:
-
-            for lang in preferred_order:
+            for kind, finder in finders:
 
                 try:
-                    selected = transcript_list.find_manually_created_transcript(
-                        [lang]
-                    )
+                    selected = finder([lang])
 
                     print(
-                        "MANUAL SUBTITLE:",
+                        "%s SUBTITLE:" % kind,
                         selected.language_code
                     )
 
@@ -746,6 +766,9 @@ def fetch_with_youtube_transcript_api(video_id: str, proxy_url: str = None):
 
                 except Exception:
                     pass
+
+            if selected is not None:
+                break
 
         # 3) Baribir topilmasa, birinchi mavjud subtitle
         if selected is None:

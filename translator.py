@@ -982,6 +982,237 @@ HOW TO SPLIT:
 """
 
 
+SPLIT_CONTRACT = """You are given the RAW, UNPUNCTUATED word stream of an \
+auto-generated subtitle track from one video, in order.
+
+Do THREE things in ONE pass:
+
+1. SEGMENT the stream into natural, self-contained display lines.
+   - Cut where a thought is COMPLETE. Prefer more cuts over fewer.
+   - If one sentence runs longer than ~25 words, cut it again at a natural
+     clause boundary (a comma, "and", "but", "so", "that", "which", "because").
+   - NEVER cut in the middle of a phrase. A line must never end on a word like
+     "the", "my", "a", "to", "and", "is", "I've".
+   - Each line appears on screen ALONE, so it must make sense on its own.
+
+2. RESTORE punctuation and capitalisation inside each line.
+
+3. TRANSLATE each line into UZBEK (Latin script), following the style rules
+   given further below.
+
+## OUTPUT CONTRACT (violating this breaks the video player — highest priority)
+Return ONLY valid JSON:
+{"sentences":[{"en":"<line with punctuation>","uz":"<uzbek translation>"}]}
+
+## ABSOLUTE RULE — the English words are preserved EXACTLY
+- Concatenating every "en" in order must reproduce the input word-for-word.
+- Do NOT add, remove, reorder, merge, split, correct or paraphrase any word.
+- You may ONLY add punctuation marks and change letter case.
+- Keep filler, repetition and speech errors exactly where they are
+  (uh, um, you know, repeated words). Do not tidy the speech up.
+
+## ABSOLUTE RULE — each translation covers ONLY its own line
+- "uz" must translate its own "en" and nothing else.
+- Never pull meaning forward from the NEXT line. If the thought continues in
+  the next line, let it continue there.
+- Never leave part of your own line untranslated.
+This matters because "en" and "uz" are shown on screen together, at the same
+timestamp. If "uz" describes words the viewer has not heard yet, it is wrong.
+"""
+
+SPLIT_SYSTEM = (
+    SPLIT_CONTRACT
+    + "\n\n"
+    + "## TRANSLATION STYLE\n"
+      "Everything below describes HOW to translate. Follow all of it.\n"
+      "IGNORE any output format mentioned below — the OUTPUT CONTRACT above\n"
+      "is the only valid format.\n\n"
+    + SYSTEM_PROMPT
+)
+
+# SPLIT_TRANSLATE=0 -> eski yo'l qaytadi (nuqta tiklash + mexanik kesish).
+SPLIT_TRANSLATE = os.getenv(
+    "SPLIT_TRANSLATE", "1"
+) not in ("0", "false", "no", "off")
+
+
+def _build_split_user_message(plain, video_title, glossary):
+    parts = []
+
+    if video_title:
+        parts.append(
+            "VIDEO TITLE (context only, do not translate):\n%s\n" % video_title
+        )
+
+    if glossary:
+        gl = ", ".join('"%s" -> "%s"' % (k, v)
+                       for k, v in list(glossary.items())[:40])
+        parts.append("GLOSSARY (use these exact Uzbek terms):\n%s\n" % gl)
+
+    parts.append("RAW SUBTITLE WORDS:\n" + plain)
+    return "\n".join(parts)
+
+
+def split_and_translate(words, video_title="", glossary=None):
+    """
+    Matnni gaplarga bo'ladi VA tarjima qiladi — BITTA so'rovda.
+
+    NEGA BITTA SO'ROV. Eski tartib: xom matn -> KESISH -> tarjima. Kesish
+    tushunishdan oldin bo'lgani uchun tizim gap qayerda tugashini bilmay
+    turib kesishga majbur edi. Tinish belgisi yo'q avtomatik subtitrda esa
+    kesish 160 belgida mexanik bo'lardi — birlik doim gap o'rtasida uzilib,
+    model bo'lak-jumlani ko'rib fikrni o'zicha tugatib qo'yardi.
+
+    Endi chegara va tarjima BITTA qarordan chiqadi, ya'ni inglizcha va
+    o'zbekcha bir xil so'zlarni qamrashi strukturaviy jihatdan kafolatlangan.
+
+    KAFOLAT: barcha "en" larni birlashtirib asl so'z oqimi bilan aynan
+    solishtiramiz. Bitta so'z farq qilsa None qaytadi va chaqiruvchi eski
+    yo'lga tushadi — ya'ni yomonlashish mumkin emas.
+
+    return: [{"en","uz"}] yoki None
+    """
+    if not words:
+        return None
+
+    plain = " ".join(words)
+
+    key = "uz:split:%s:%s" % (
+        PROMPT_VERSION,
+        hashlib.sha1(plain.encode("utf-8")).hexdigest()[:20]
+    )
+
+    cached = get_cache(key)
+    if cached:
+        print("SPLIT+TRANSLATE: keshdan %d gap" % len(cached))
+        return cached
+
+    try:
+        response = _openai().chat.completions.create(
+            model=TRANSLATE_MODEL,
+            messages=[
+                {"role": "system", "content": SPLIT_SYSTEM},
+                {"role": "user", "content": _build_split_user_message(
+                    plain, video_title, glossary or {})},
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+
+        try:
+            usage = response.usage
+            USAGE["requests"] += 1
+            USAGE["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+            USAGE["completion_tokens"] += getattr(
+                usage, "completion_tokens", 0) or 0
+            details = getattr(usage, "prompt_tokens_details", None)
+            if details is not None:
+                USAGE["cached_tokens"] += getattr(
+                    details, "cached_tokens", 0) or 0
+        except Exception:
+            pass
+
+        data = json.loads(response.choices[0].message.content)
+
+    except Exception as error:
+        print("SPLIT+TRANSLATE ERROR:", error)
+        return None
+
+    out = []
+
+    for row in data.get("sentences") or []:
+        if not isinstance(row, dict):
+            continue
+        en = _clean(row.get("en") or "")
+        uz = _clean(row.get("uz") or "")
+        if en:
+            out.append({"en": en, "uz": uz or en})
+
+    if not out:
+        print("SPLIT REJECTED: bo'sh javob")
+        return None
+
+    # ---- KAFOLAT ----
+    got = " ".join(s["en"] for s in out).split()
+
+    if len(got) != len(words):
+        print("SPLIT REJECTED: so'z soni farq qildi (%d -> %d)"
+              % (len(words), len(got)))
+        return None
+
+    for a, b in zip(words, got):
+        if _norm_word(a) != _norm_word(b):
+            print("SPLIT REJECTED: so'z o'zgardi (%r -> %r)" % (a, b))
+            return None
+
+    set_cache(key, out, TRANSLATION_TTL)
+
+    # Gap tarjimalari alohida keshga ham tushadi — boshqa sahifada
+    # o'sha gap uchrasa qayta so'ralmaydi.
+    for s in out:
+        set_cache(_sent_cache_key(s["en"]), s["uz"], TRANSLATION_TTL)
+
+    print("SPLIT+TRANSLATE OK: %d gap, %d so'z" % (len(out), len(got)))
+
+    return out
+
+
+def _units_from_split(pre, owner_of_word, speech):
+    """split_and_translate natijasini birliklarga aylantiradi.
+
+    Segment qaysi birlikka tegishli ekani so'zlar KO'PCHILIGI bo'yicha
+    hal qilinadi — mavjud mantiq bilan bir xil, ya'ni "har bir segment
+    aynan bitta birlikka tegishli" invarianti saqlanadi.
+    """
+    counts = {}
+    position = 0
+
+    for i, s in enumerate(pre):
+        n = len(s["en"].split())
+
+        for j in range(position, min(position + n, len(owner_of_word))):
+            key = (owner_of_word[j], i)
+            counts[key] = counts.get(key, 0) + 1
+
+        position += n
+
+    best = {}
+    for (seg_index, unit_i), n in counts.items():
+        cur = best.get(seg_index)
+        if cur is None or n > cur[1]:
+            best[seg_index] = (unit_i, n)
+
+    segs_of_unit = {}
+    for it in speech:
+        pick = best.get(it["index"])
+        if pick is None:
+            continue
+        segs_of_unit.setdefault(pick[0], []).append(it)
+
+    units = []
+
+    for i, s in enumerate(pre):
+        segs = segs_of_unit.get(i, [])
+
+        # Segment tegmagan birlik ekranda ko'rinmaydi — oldingisiga qo'shamiz
+        if not segs and units:
+            units[-1]["text"] = _clean(units[-1]["text"] + " " + s["en"])
+            units[-1]["uz"] = _clean(units[-1]["uz"] + " " + s["uz"])
+            continue
+
+        units.append({
+            "text": s["en"],
+            "uz": s["uz"],
+            "segments": segs,
+        })
+
+    for i, u in enumerate(units):
+        u["sid"] = i
+        u["segments"].sort(key=lambda x: x["index"])
+
+    return units
+
+
 def restore_punctuation(text):
     """
     Nuqtasiz ASR matniga tinish belgilarini qo'yadi. So'zlar o'zgarmasligi
@@ -1041,7 +1272,8 @@ def restore_punctuation(text):
     return out
 
 
-def build_sentence_units(items, max_chars, max_segments):
+def build_sentence_units(items, max_chars, max_segments,
+                         video_title="", glossary=None):
     """
     Matnni NUQTADA kesadi, cue'ni esa segment darajasida qoldiradi.
 
@@ -1076,6 +1308,22 @@ def build_sentence_units(items, max_chars, max_segments):
         return []
 
     plain = " ".join(words)
+
+    # =================================================================
+    # KESISH VA TARJIMA BITTA SO'ROVDA
+    # =================================================================
+    #
+    # Faqat tinish belgisi YO'Q matnda ishlaydi. Punktuatsiyali (odatda
+    # qo'lda yozilgan) subtitrda _BOUNDARY chegaralarni o'zi topadi va bu
+    # yo'l keraksiz — u yerda inglizcha aks-sado chiqishga qo'shilib
+    # so'rovni ~47% qimmatlashtirardi. Nuqtasiz matnda esa aksincha:
+    # nuqta tiklash so'rovi o'rniga o'tadi, ya'ni ~10% ARZON tushadi.
+    if SPLIT_TRANSLATE and _longest_unpunctuated_run(plain) > PUNCT_MAX_RUN:
+
+        pre = split_and_translate(words, video_title, glossary)
+
+        if pre:
+            return _units_from_split(pre, owner_of_word, speech)
 
     # Tinish belgilari yetarlimi? Yetmasa modeldan tiklashni so'raymiz.
     # Punktuatsiyali videolarda bu so'rov UMUMAN ketmaydi.
@@ -1238,7 +1486,8 @@ def translate_range_paired(items, offset, limit, video_title="",
     if PAIRED_SPLIT:
         # Matn nuqtada kesiladi -> har bir birlik ma'no jihatdan tugal
         sentences = build_sentence_units(
-            window, PAIRED_MAX_CHARS, PAIRED_MAX_SEGMENTS)
+            window, PAIRED_MAX_CHARS, PAIRED_MAX_SEGMENTS,
+            video_title, glossary)
     else:
         # Eski yo'l: segment darajasida birlashtirish (PAIRED_SPLIT=0)
         sentences = merge_into_sentences(
@@ -1250,12 +1499,21 @@ def translate_range_paired(items, offset, limit, video_title="",
     if not sentences:
         return build_strict_cues_from_map(chunk, {})
 
-    translations = translate_sentences(sentences, video_title, glossary)
+    # Tarjimasi allaqachon bor gaplar — split_and_translate ularni
+    # kesish bilan birga qaytargan, ya'ni qayta so'rash shart emas.
+    pending = [s for s in sentences if not s.get("uz")]
+
+    translations = (
+        translate_sentences(pending, video_title, glossary)
+        if pending else {}
+    )
 
     # segment indeksi -> (inglizcha gap, o'zbekcha gap)
     pair_by_seg = {}
     for s in sentences:
-        uz = _clean(translations.get(s["sid"]) or "") or s["text"]
+        uz = _clean(
+            s.get("uz") or translations.get(s["sid"]) or ""
+        ) or s["text"]
         for seg in s["segments"]:
             pair_by_seg[seg["index"]] = (s["text"], uz)
 
