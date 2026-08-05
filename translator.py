@@ -126,6 +126,15 @@ _NOISE = re.compile(
     re.IGNORECASE,
 )
 
+# Xuddi shu belgi, lekin segment ICHIDA, so'zlar orasida turgani.
+# _NOISE anchor'li (^...$) bo'lgani uchun bunday holatni o'tkazib yuboradi.
+_INLINE_NOISE = re.compile(
+    u"[\\[(](music|applause|laughter|inaudible|musiqa|karsak|"
+    u"музыка|аплодисменты|"
+    u"音楽|拍手)[^\\])]*[\\])]",
+    re.IGNORECASE,
+)
+
 # Eski V1 bularni tarjima qilardi ([Music] -> [Musiqa]). Yangi pipeline ularni
 # gaplardan chiqarib tashlaydi, shuning uchun tarjimasini alohida beramiz —
 # aks holda regressiya bo'ladi.
@@ -999,9 +1008,14 @@ auto-generated subtitle track from one video, in order.
 Do THREE things in ONE pass:
 
 1. SEGMENT the stream into natural, self-contained display lines.
+   - HARD LIMIT: never return an "en" longer than 16 words. This is not a
+     suggestion — a longer line does not fit on a phone screen.
    - Cut where a thought is COMPLETE. Prefer more cuts over fewer.
-   - If one sentence runs longer than ~25 words, cut it again at a natural
-     clause boundary (a comma, "and", "but", "so", "that", "which", "because").
+   - A long sentence MUST become several entries. Cut it at a comma or before
+     "and", "but", "so", "that", "which", "because", "when", "while".
+     Splitting one sentence across two lines is normal and expected.
+   - When you split a sentence, split the Uzbek at the SAME place. Each entry
+     carries its own "en" and its own "uz".
    - NEVER cut in the middle of a phrase. A line must never end on a word like
      "the", "my", "a", "to", "and", "is", "I've".
    - Each line appears on screen ALONE, so it must make sense on its own.
@@ -1084,6 +1098,101 @@ SPLIT_BLOCK_SLACK = int(os.getenv("SPLIT_BLOCK_SLACK", "40"))
 SPLIT_MAX_REPAIR = float(os.getenv("SPLIT_MAX_REPAIR", "0.02"))
 
 _TRAIL_PUNCT = re.compile(r"[^\w']+$", re.UNICODE)
+
+# Ekranga sig'adigan uzunlik. Model prompt'da ham shu chegarani oladi,
+# lekin unga TAYANIB BO'LMAYDI — 38 so'zlik qator jonli ilovada chiqdi.
+# Shuning uchun pastda determinist to'siq ham bor.
+MAX_LINE_WORDS = int(os.getenv("SPLIT_MAX_LINE_WORDS", "16"))
+
+# Shu so'zlardan OLDIN kesish ma'noga zarar qilmaydi.
+_CLAUSE_WORDS = {
+    "and", "but", "so", "because", "which", "that", "when", "while",
+    "if", "or", "then", "after", "before", "since", "although", "though",
+}
+
+
+def _clause_points(words):
+    """Kesish mumkin bo'lgan so'z indekslari (o'sha so'zdan OLDIN)."""
+    points = []
+
+    for i in range(1, len(words)):
+        previous = words[i - 1]
+
+        if previous.endswith((",", ";", ":", "—", "-")):
+            points.append(i)
+        elif _norm_word(words[i]) in _CLAUSE_WORDS:
+            points.append(i)
+
+    return points
+
+
+def _split_long_pair(en, uz):
+    """
+    Uzun qatorni ekranga sig'adigan bo'laklarga ajratadi.
+
+    Inglizchasi ergash gap chegarasida kesiladi, o'zbekchasi esa
+    split_proportional bilan — u so'z tartibini va sonini saqlaydi,
+    ya'ni matn yo'qolmaydi.
+
+    Ma'no jihatdan bu ideal emas (o'zbekcha kesim oxirida keladi), lekin
+    ekranda 38 so'zlik blok turgandan ko'ra yaxshiroq.
+    """
+    words = en.split()
+
+    if len(words) <= MAX_LINE_WORDS:
+        return [{"en": en, "uz": uz}]
+
+    points = _clause_points(words)
+
+    cuts = []
+    start = 0
+
+    while len(words) - start > MAX_LINE_WORDS:
+        target = start + MAX_LINE_WORDS
+
+        # Chegaraga eng yaqin, lekin undan oshmaydigan ergash gap nuqtasi.
+        # Juda qisqa bo'lak chiqmasin deb start+4 dan boshlaymiz.
+        candidates = [p for p in points if start + 4 <= p <= target]
+
+        cut = candidates[-1] if candidates else target
+        cuts.append(cut)
+        start = cut
+
+    if not cuts:
+        return [{"en": en, "uz": uz}]
+
+    bounds = [0] + cuts + [len(words)]
+
+    en_parts = [
+        " ".join(words[bounds[i]:bounds[i + 1]])
+        for i in range(len(bounds) - 1)
+    ]
+
+    weights = [max(1, len(p)) for p in en_parts]
+    uz_parts = split_proportional(uz or "", weights)
+
+    return [
+        {"en": e, "uz": u.strip()}
+        for e, u in zip(en_parts, uz_parts)
+    ]
+
+
+def _enforce_line_length(rows):
+    """Modelning uzunlik chegarasini determinist ravishda majburlaydi."""
+    out = []
+    long_lines = 0
+
+    for row in rows:
+        parts = _split_long_pair(row["en"], row["uz"])
+        if len(parts) > 1:
+            long_lines += 1
+        out.extend(parts)
+
+    if long_lines:
+        print("SPLIT: %d ta uzun qator bo'laklandi (chegara %d so'z)"
+              % (long_lines, MAX_LINE_WORDS))
+
+    return out
 
 
 def _split_blocks(words, pause_before):
@@ -1173,7 +1282,7 @@ def _raw_rows(words, pause_before, offset):
     rows = []
     start = 0
     total = len(words)
-    target = 22          # ekranga sig'adigan uzunlik
+    target = MAX_LINE_WORDS
 
     while start < total:
 
@@ -1252,6 +1361,9 @@ def split_and_translate(words, video_title="", glossary=None,
 
     if not out:
         return None
+
+    # Model 16 so'z chegarasini buzsa ham ekranga uzun qator chiqmasin.
+    out = _enforce_line_length(out)
 
     print("SPLIT+TRANSLATE: %d/%d blok, %d gap, %d so'z"
           % (ok_blocks, len(blocks), len(out), len(words)))
@@ -1478,7 +1590,11 @@ def build_sentence_units(items, max_chars, max_segments,
     owner_of_word = []
 
     for it in speech:
-        for w in it["text"].split():
+        # _NOISE faqat BUTUN segment "[Music]" bo'lsa ushlaydi. Ekranda esa
+        # "...across [music] every major platform" chiqdi — ya'ni belgi
+        # segment ichida, so'zlar orasida turgan. Uni shu yerda olib
+        # tashlaymiz, aks holda u tarjimaga ham, ekranga ham kirib qoladi.
+        for w in _INLINE_NOISE.sub(" ", it["text"]).split():
             words.append(w)
             owner_of_word.append(it["index"])
 
