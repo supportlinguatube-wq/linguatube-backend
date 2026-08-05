@@ -530,24 +530,13 @@ def _translate_batch_safe(batch, context_text, video_title, glossary):
     return result
 
 
-def translate_sentences(sentences, video_title="", glossary=None, known=None):
-    """sentences -> {sid: uzbek_text}. Redis kesh + parallel batch.
-
-    `known` — allaqachon tarjima qilingan sid'lar (split_and_translate
-    kesish bilan birga qaytargan). Ular modelga qayta yuborilmaydi.
-
-    DIQQAT: `sentences` TO'LIQ ro'yxat bo'lishi kerak, filtrlangan emas —
-    kontekst `sentences[sid-2:sid]` bilan olinadi, ya'ni sid ro'yxatdagi
-    o'rin bilan mos kelishi shart.
-    """
+def translate_sentences(sentences, video_title="", glossary=None):
+    """sentences -> {sid: uzbek_text}. Redis kesh + parallel batch."""
     glossary = glossary or {}
-    translations = dict(known or {})
+    translations = {}
     todo = []
 
     for s in sentences:
-        if s["sid"] in translations:
-            continue
-
         cached = get_cache(_sent_cache_key(s["text"]))
         if cached:
             translations[s["sid"]] = cached
@@ -1064,143 +1053,7 @@ def _build_split_user_message(plain, video_title, glossary):
     return "\n".join(parts)
 
 
-# Blok uzunligi. Modelning xato darajasi ~1000 so'zga 1 ta, va xato
-# EHTIMOLI blok uzunligiga eksponensial bog'liq:
-#   700 so'z -> ~50% muvaffaqiyat   (jonli logda kuzatilgani)
-#   300 so'z -> ~74%
-#   150 so'z -> ~86%
-# Blok kichik bo'lsa yiqilish ham LOKAL bo'ladi: butun sahifa emas, faqat
-# o'sha bo'lak eski yo'lga tushadi.
-SPLIT_BLOCK_WORDS = int(os.getenv("SPLIT_BLOCK_WORDS", "150"))
-
-# Chegarani qidirish oynasi. Blok TASODIFIY joyda kesilmasligi shart —
-# aks holda har bir blok chegarasida aynan tuzatmoqchi bo'lgan muammo
-# qaytadi (gap o'rtasida uzilish). Shuning uchun ±SLACK oralig'idagi eng
-# uzun jimlik tanlanadi.
-SPLIT_BLOCK_SLACK = int(os.getenv("SPLIT_BLOCK_SLACK", "40"))
-
-# So'z soni to'g'ri, lekin model ba'zi so'zni o'zgartirgan bo'lsa
-# ('cuz -> 'cause, wings -> wing's) — bu ulushdan kam bo'lsa tuzatamiz.
-SPLIT_MAX_REPAIR = float(os.getenv("SPLIT_MAX_REPAIR", "0.02"))
-
-_TRAIL_PUNCT = re.compile(r"[^\w']+$", re.UNICODE)
-
-
-def _split_blocks(words, pause_before):
-    """So'zlarni bloklarga bo'ladi, chegarani ENG UZUN jimlikka qo'yadi."""
-    blocks = []
-    start = 0
-    total = len(words)
-
-    while start < total:
-
-        if total - start <= SPLIT_BLOCK_WORDS + SPLIT_BLOCK_SLACK:
-            blocks.append((start, total))
-            break
-
-        lo = start + max(1, SPLIT_BLOCK_WORDS - SPLIT_BLOCK_SLACK)
-        hi = min(total, start + SPLIT_BLOCK_WORDS + SPLIT_BLOCK_SLACK)
-
-        cut = hi
-        best = None
-
-        if pause_before:
-            for i in range(lo, hi):
-                gap = pause_before[i]
-                if best is None or gap > best:
-                    best = gap
-                    cut = i
-
-        blocks.append((start, cut))
-        start = cut
-
-    return blocks
-
-
-def _validate_rows(src_words, rows):
-    """
-    Model javobini asl so'z oqimi bilan solishtiradi.
-
-    return: (rows, None) yoki (None, sabab)
-
-    So'z SONI to'g'ri bo'lsa moslik 1:1 bo'ladi, shuning uchun farq qilgan
-    so'zni asliga qaytarib qo'yish yetarli — butun blokni tashlash shart
-    emas. Modelning tinish belgisi saqlanadi, faqat so'zning o'zi tiklanadi.
-    """
-    got = " ".join(r["en"] for r in rows).split()
-
-    if len(got) != len(src_words):
-        return None, "so'z soni farq qildi (%d -> %d)" % (
-            len(src_words), len(got))
-
-    fixed = []
-    repaired = 0
-
-    for original, produced in zip(src_words, got):
-
-        if _norm_word(original) == _norm_word(produced):
-            fixed.append(produced)
-            continue
-
-        trail = _TRAIL_PUNCT.search(produced)
-        fixed.append(original + (trail.group(0) if trail else ""))
-        repaired += 1
-
-    if repaired > max(1, int(len(src_words) * SPLIT_MAX_REPAIR)):
-        return None, "juda ko'p so'z o'zgargan (%d/%d)" % (
-            repaired, len(src_words))
-
-    if repaired:
-        print("SPLIT REPAIRED: %d so'z asliga qaytarildi" % repaired)
-
-        # Tuzatilgan so'zlarni qatorlar shakliga qaytaramiz
-        position = 0
-        for row in rows:
-            n = len(row["en"].split())
-            row["en"] = " ".join(fixed[position:position + n])
-            position += n
-
-    return rows, None
-
-
-def _raw_rows(words, pause_before, offset):
-    """
-    Blok yiqilganda zaxira: so'zlarni jimlik bo'yicha bo'laklarga ajratadi,
-    tarjimasiz. Chaqiruvchi ularni eski yo'l bilan tarjima qiladi.
-
-    Muhimi: so'zlar O'ZGARMAYDI, ya'ni umumiy kafolat buzilmaydi.
-    """
-    rows = []
-    start = 0
-    total = len(words)
-    target = 22          # ekranga sig'adigan uzunlik
-
-    while start < total:
-
-        if total - start <= target + 8:
-            rows.append({"en": " ".join(words[start:total]), "uz": ""})
-            break
-
-        lo = start + max(1, target - 8)
-        hi = min(total, start + target + 8)
-
-        cut = hi
-        best = None
-
-        for i in range(lo, hi):
-            gap = pause_before[offset + i] if pause_before else 0.0
-            if best is None or gap > best:
-                best = gap
-                cut = i
-
-        rows.append({"en": " ".join(words[start:cut]), "uz": ""})
-        start = cut
-
-    return rows
-
-
-def split_and_translate(words, video_title="", glossary=None,
-                        pause_before=None):
+def split_and_translate(words, video_title="", glossary=None):
     """
     Matnni gaplarga bo'ladi VA tarjima qiladi — BITTA so'rovda.
 
@@ -1213,54 +1066,14 @@ def split_and_translate(words, video_title="", glossary=None,
     Endi chegara va tarjima BITTA qarordan chiqadi, ya'ni inglizcha va
     o'zbekcha bir xil so'zlarni qamrashi strukturaviy jihatdan kafolatlangan.
 
-    BLOKLAB ISHLAYDI. Butun oynani bitta so'rovga berish 700+ so'zda 50%
-    yiqilardi. Endi ~150 so'zli bloklar, chegarasi jimlikda, har biri
-    ALOHIDA tekshiriladi va parallel ketadi.
-
-    KAFOLAT: har bir blokning "en" lari o'sha blokning asl so'zlari bilan
-    aynan solishtiriladi. Yiqilgan blok tarjimasiz qaytadi (chaqiruvchi uni
-    eski yo'l bilan tarjima qiladi), qolgan bloklar esa yangi yo'ldan
-    o'tadi — ya'ni yiqilish lokal.
+    KAFOLAT: barcha "en" larni birlashtirib asl so'z oqimi bilan aynan
+    solishtiramiz. Bitta so'z farq qilsa None qaytadi va chaqiruvchi eski
+    yo'lga tushadi — ya'ni yomonlashish mumkin emas.
 
     return: [{"en","uz"}] yoki None
     """
     if not words:
         return None
-
-    blocks = _split_blocks(words, pause_before)
-
-    def run(block):
-        lo, hi = block
-        return _split_one_block(
-            words[lo:hi], video_title, glossary, pause_before, lo)
-
-    if len(blocks) == 1:
-        results = [run(blocks[0])]
-    else:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            results = list(executor.map(run, blocks))
-
-    out = []
-    ok_blocks = 0
-
-    for rows in results:
-        if rows is None:
-            return None
-        if any(r["uz"] for r in rows):
-            ok_blocks += 1
-        out.extend(rows)
-
-    if not out:
-        return None
-
-    print("SPLIT+TRANSLATE: %d/%d blok, %d gap, %d so'z"
-          % (ok_blocks, len(blocks), len(out), len(words)))
-
-    return out
-
-
-def _split_one_block(words, video_title, glossary, pause_before, offset):
-    """Bitta blok. Yiqilsa tarjimasiz xom qatorlar qaytadi (None emas)."""
 
     plain = " ".join(words)
 
@@ -1271,6 +1084,7 @@ def _split_one_block(words, video_title, glossary, pause_before, offset):
 
     cached = get_cache(key)
     if cached:
+        print("SPLIT+TRANSLATE: keshdan %d gap" % len(cached))
         return cached
 
     try:
@@ -1301,8 +1115,8 @@ def _split_one_block(words, video_title, glossary, pause_before, offset):
         data = json.loads(response.choices[0].message.content)
 
     except Exception as error:
-        print("SPLIT BLOCK ERROR:", error)
-        return _raw_rows(words, pause_before, offset)
+        print("SPLIT+TRANSLATE ERROR:", error)
+        return None
 
     out = []
 
@@ -1316,14 +1130,20 @@ def _split_one_block(words, video_title, glossary, pause_before, offset):
 
     if not out:
         print("SPLIT REJECTED: bo'sh javob")
-        return _raw_rows(words, pause_before, offset)
+        return None
 
     # ---- KAFOLAT ----
-    out, reason = _validate_rows(words, out)
+    got = " ".join(s["en"] for s in out).split()
 
-    if out is None:
-        print("SPLIT REJECTED (%d so'zlik blok): %s" % (len(words), reason))
-        return _raw_rows(words, pause_before, offset)
+    if len(got) != len(words):
+        print("SPLIT REJECTED: so'z soni farq qildi (%d -> %d)"
+              % (len(words), len(got)))
+        return None
+
+    for a, b in zip(words, got):
+        if _norm_word(a) != _norm_word(b):
+            print("SPLIT REJECTED: so'z o'zgardi (%r -> %r)" % (a, b))
+            return None
 
     set_cache(key, out, TRANSLATION_TTL)
 
@@ -1331,6 +1151,8 @@ def _split_one_block(words, video_title, glossary, pause_before, offset):
     # o'sha gap uchrasa qayta so'ralmaydi.
     for s in out:
         set_cache(_sent_cache_key(s["en"]), s["uz"], TRANSLATION_TTL)
+
+    print("SPLIT+TRANSLATE OK: %d gap, %d so'z" % (len(out), len(got)))
 
     return out
 
@@ -1498,30 +1320,7 @@ def build_sentence_units(items, max_chars, max_segments,
     # nuqta tiklash so'rovi o'rniga o'tadi, ya'ni ~10% ARZON tushadi.
     if SPLIT_TRANSLATE and _longest_unpunctuated_run(plain) > PUNCT_MAX_RUN:
 
-        # Har bir so'z OLDIDAGI jimlik. Bloklar aynan shu bo'yicha
-        # kesiladi — tasodifiy joyda kesilsa har bir blok chegarasida
-        # gap o'rtasida uzilish qaytadi.
-        seg_time = {
-            it["index"]: (it["start"], it["start"] + it["duration"])
-            for it in speech
-        }
-
-        pause_before = []
-        previous = None
-
-        for seg_index in owner_of_word:
-
-            if previous is None or seg_index == previous:
-                pause_before.append(0.0)
-            else:
-                a = seg_time.get(previous)
-                b = seg_time.get(seg_index)
-                pause_before.append(b[0] - a[1] if (a and b) else 0.0)
-
-            previous = seg_index
-
-        pre = split_and_translate(
-            words, video_title, glossary, pause_before)
+        pre = split_and_translate(words, video_title, glossary)
 
         if pre:
             return _units_from_split(pre, owner_of_word, speech)
@@ -1702,13 +1501,12 @@ def translate_range_paired(items, offset, limit, video_title="",
 
     # Tarjimasi allaqachon bor gaplar — split_and_translate ularni
     # kesish bilan birga qaytargan, ya'ni qayta so'rash shart emas.
-    #
-    # Ro'yxat FILTRLANMAYDI: translate_sentences kontekstni sid bo'yicha
-    # kesib oladi, shuning uchun sid ro'yxatdagi o'rniga teng qolishi kerak.
-    known = {s["sid"]: s["uz"] for s in sentences if s.get("uz")}
+    pending = [s for s in sentences if not s.get("uz")]
 
-    translations = translate_sentences(
-        sentences, video_title, glossary, known)
+    translations = (
+        translate_sentences(pending, video_title, glossary)
+        if pending else {}
+    )
 
     # segment indeksi -> (inglizcha gap, o'zbekcha gap)
     pair_by_seg = {}
