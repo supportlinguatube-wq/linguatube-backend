@@ -26,9 +26,16 @@ from cache import get_cache, set_cache, TRANSLATION_TTL
 from translator import (
     translate_transcript,
     translate_range,
+    translate_range_paired,
+    translate_range_strict,
     slice_by_time,
-    PROMPT_VERSION,
+    settings_fingerprint,
 )
+
+# /transcript bilan BIR XIL rejim tanlanishi uchun — ikkalasi ayni mantiqdan
+# foydalanishi shart, aks holda foydalanuvchi qaysi endpoint chaqirilganiga
+# qarab boshqa sifat oladi.
+PAIRED_ON = os.getenv("TRANSLATE_PAIRED") in ("1", "true", "yes", "on")
 
 router = APIRouter(prefix="/v2", tags=["v2"])
 
@@ -48,9 +55,48 @@ def _deps():
 
 
 def _window_key(video_id, from_time, mode):
-    # PROMPT_VERSION kalitda — prompt o'zgarsa kesh o'zi bekor bo'ladi
+    # Sozlamalar barmoq izi kalitda — istalgan sozlama o'zgarsa kesh
+    # o'z-o'zidan bekor bo'ladi
     return "uz:win:%s:%s:%s:%d:%d" % (
-        PROMPT_VERSION, video_id, mode, int(from_time), int(WINDOW))
+        settings_fingerprint(), video_id, mode, int(from_time), int(WINDOW))
+
+
+def _index_range_for_time(items, from_time, window):
+    """
+    Vaqt oynasini SEGMENT INDEKSLARI diapazoniga aylantiradi.
+
+    Nega kerak: `/transcript` index bo'yicha ishlaydi va butun paired mantiq
+    o'sha yerda. Bu yerda ham xuddi shu funksiyani chaqirish uchun vaqtni
+    indeksga o'girib olamiz — shunda ikkala endpoint AYNI kodni ishlatadi
+    va sifat farq qilmaydi.
+
+    return: (offset, count) yoki (None, 0)
+    """
+    to_time = from_time + window
+
+    first = None
+    last = None
+
+    for i, it in enumerate(items):
+
+        start = float(it.get("start", 0) or 0)
+        end = start + float(it.get("duration", 0) or 0)
+
+        if end <= from_time:
+            continue
+
+        if start >= to_time:
+            break
+
+        if first is None:
+            first = i
+
+        last = i
+
+    if first is None:
+        return None, 0
+
+    return first, (last - first + 1)
 
 
 def _has_subtitles(items):
@@ -76,17 +122,29 @@ def _translate_window(video_id, from_time, video_title="", mode="sentence"):
     if not _has_subtitles(items):
         return None
 
-    # Kontekst uchun oynadan 10 s oldin boshlaymiz, keyin kesib tashlaymiz
-    raw = slice_by_time(items, max(0.0, from_time - CONTEXT_PAD),
-                        WINDOW + CONTEXT_PAD)
-    if not raw:
+    # Vaqtni indeksga o'giramiz va /transcript ISHLATADIGAN AYNI funksiyani
+    # chaqiramiz. Ilgari bu yerda translate_transcript(mode="sentence")
+    # ishlatilardi — u paired rejimni bilmaydi va ingliz-o'zbek mosligini
+    # bermaydi. Ikkala endpoint bir xil natija berishi shart.
+    offset, count = _index_range_for_time(items, from_time, WINDOW)
+
+    if offset is None:
         return []
 
-    cues = translate_transcript(raw, video_title=video_title, mode=mode)
-    cues = [c for c in cues if c["start"] + c["duration"] > from_time]
+    if PAIRED_ON:
+        cues = translate_range_paired(
+            items, offset, count, video_title=video_title
+        )
+    else:
+        cues = translate_range_strict(
+            items, offset, count, video_title=video_title
+        )
 
-    for i, c in enumerate(cues):
-        c["index"] = i
+    # DIQQAT: `index` ATAYLAB qayta raqamlanmaydi.
+    #
+    # U segmentning ABSOLYUT indeksi bo'lib qoladi. Ilova bir necha oynani
+    # birlashtirganda takrorlarni aynan shu bo'yicha filtrlaydi — qayta
+    # raqamlasak, har oyna 0 dan boshlanib, birlashtirish buzilardi.
 
     set_cache(key, cues, TRANSLATION_TTL)
     return cues
@@ -119,6 +177,16 @@ async def v2_subtitles(
     """
     Frontend: /v2/subtitles/VIDEO_ID?t=0  -> keyin ?t=90 -> ?t=180 ...
     `next_t` javobda qaytadi, frontend shuni ishlatadi.
+
+    ENG MUHIMI: istalgan `t` ni berish mumkin. Foydalanuvchi videoni
+    20-daqiqaga sursa `?t=1200` yuboriladi va subtitr DARHOL keladi.
+    Eski `/transcript` da bu imkonsiz edi — u faqat sahifama-sahifa,
+    boshidan oldinga yura olardi.
+
+    `mode` parametri endi xatti-harakatni O'ZGARTIRMAYDI. Paired yoki
+    strict tanlovi `/transcript` dagi kabi `TRANSLATE_PAIRED` env'idan
+    olinadi, shunda ikkala endpoint bir xil natija beradi. Parametr
+    faqat eski chaqiruvlar buzilmasligi uchun qoldirilgan.
     """
     if mode not in ("sentence", "segment"):
         mode = "sentence"
