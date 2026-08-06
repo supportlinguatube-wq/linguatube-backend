@@ -3,6 +3,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from openai import OpenAI
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
+from translator import settings_fingerprint
 from auth import (
     require_access,
     check_access,
@@ -1068,7 +1069,21 @@ def get_transcript(
     #   3. cold_slot — 100 kishi HAR XIL video ochsa, bir vaqtda faqat
     #      MAX_COLD tasi ishlaydi. Bu OpenAI limitini ham, thread'larni
     #      ham asraydi.
-    page_key = "page:v1:%s:%d:%d" % (video_id, offset, limit)
+    # Kalitga SOZLAMALAR BARMOQ IZI ham kiradi.
+    #
+    # Ilgari kalit faqat (video_id, offset, limit) edi. Natijada
+    # PAIRED_MAX_CHARS yoki PROMPT_VERSION ni o'zgartirsangiz, keshdagi
+    # eski javob 3 kun davomida qaytaverardi va o'zgarish "ishlamayotgandek"
+    # ko'rinardi. Aynan shu chalkashlikka tushgan edik.
+    #
+    # Endi istalgan sozlama o'zgarsa barmoq izi ham o'zgaradi va kesh
+    # o'z-o'zidan bekor bo'ladi — qo'lda tozalash kerak emas.
+    page_key = "page:%s:%s:%d:%d" % (
+        settings_fingerprint(),
+        video_id,
+        offset,
+        limit
+    )
 
     # DIQQAT: bu ATAYLAB "ruxsat ro'yxati", ya'ni faqat aniq qiymatlar
     # keshni chetlab o'tadi.

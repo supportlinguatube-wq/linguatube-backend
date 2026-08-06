@@ -424,6 +424,39 @@ Also correct: Colin, Amelia, Genovia, San Francisco, Real Life English.
 PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v3")
 
 
+def settings_fingerprint():
+    """
+    Tarjima natijasiga ta'sir qiladigan BARCHA sozlamalarning qisqa hash'i.
+
+    Sahifa keshining kalitiga qo'shiladi. Sozlamalardan bittasi o'zgarsa
+    hash o'zgaradi va eski keshlangan javoblar avtomatik yetib bo'lmaydigan
+    bo'ladi.
+
+    Nega kerak: ilgari sahifa kaliti faqat (video_id, offset, limit) edi.
+    PAIRED_MAX_CHARS ni 160 dan 90 ga tushirganda hech narsa o'zgarmadi,
+    chunki tayyor javob keshdan kelaverdi. Sabab uzoq qidirildi.
+
+    YANGI SOZLAMA QO'SHSANGIZ — uni shu ro'yxatga ham qo'shing.
+    """
+    parts = [
+        PROMPT_VERSION,
+        TRANSLATE_MODEL,
+        str(PAIRED_MAX_CHARS),
+        str(PAIRED_MAX_SEGMENTS),
+        str(MIN_SENTENCE_CHARS),
+        str(MAX_SENTENCE_CHARS),
+        str(MAX_SENTENCE_SEGMENTS),
+        str(PUNCT_MAX_RUN),
+        "1" if PAIRED_SPLIT else "0",
+        "1" if RESTORE_PUNCT else "0",
+        "1" if SPLIT_TRANSLATE else "0",
+    ]
+
+    raw = "|".join(parts).encode("utf-8")
+
+    return hashlib.sha1(raw).hexdigest()[:10]
+
+
 def _sent_cache_key(text):
     h = hashlib.sha1(text.encode("utf-8")).hexdigest()[:20]
     return "uz:tr:%s:%s" % (PROMPT_VERSION, h)
