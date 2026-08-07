@@ -25,6 +25,17 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 try:
+    # Ko'p so'zli iboralar moduli. Yo'q bo'lsa ham tarjima ishlayveradi —
+    # shuning uchun import ham himoyalangan.
+    from expressions import attach as attach_expressions
+    from expressions import ENABLED as EXPRESSIONS_ENABLED
+except Exception:  # pragma: no cover
+    EXPRESSIONS_ENABLED = False
+
+    def attach_expressions(cues):
+        return cues
+
+try:
     from cache import get_cache, set_cache, TRANSLATION_TTL
 except Exception:  # test / standalone rejimi (redis yo'q)
     _MEM = {}
@@ -450,6 +461,7 @@ def settings_fingerprint():
         "1" if PAIRED_SPLIT else "0",
         "1" if RESTORE_PUNCT else "0",
         "1" if SPLIT_TRANSLATE else "0",
+        "1" if EXPRESSIONS_ENABLED else "0",
     ]
 
     raw = "|".join(parts).encode("utf-8")
@@ -941,7 +953,7 @@ def build_strict_cues(items, sentences, translations):
 
     # DIQQAT: strict rejimda _normalize_cues ATAYLAB chaqirilmaydi —
     # taymkodlar eski javob bilan bit-bit bir xil qolishi kerak.
-    return cues
+    return attach_expressions(cues)
 
 
 # PAIRED rejim chegaralari — env bilan sozlanadi, redeploy kerak emas.
@@ -1550,6 +1562,7 @@ def translate_range_paired(items, offset, limit, video_title="",
         for seg in s["segments"]:
             pair_by_seg[seg["index"]] = (s["text"], uz)
 
+    # Iboralar shu ro'yxat tayyor bo'lgandan KEYIN qo'shiladi — pastga qarang
     cues = []
     for it in chunk:
         pair = pair_by_seg.get(it["index"])
@@ -1569,7 +1582,10 @@ def translate_range_paired(items, offset, limit, video_title="",
             "duration": it["duration"],
         })
 
-    return cues
+    # Ko'p so'zli iboralar — MUSTAQIL modul, flag ostida.
+    # O'chirilgan bo'lsa cue'larga umuman tegmaydi (kalit ham qo'shilmaydi).
+    # Xato bo'lsa jim o'tadi — subtitr hech qachon to'xtamaydi.
+    return attach_expressions(cues)
 
 
 def translate_range_strict(items, offset, limit, video_title="",
