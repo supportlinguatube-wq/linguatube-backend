@@ -164,7 +164,7 @@ print("OK  vaqt oynasi barcha %d segmentni qamradi (chegarada %d ta ustma-ust)\n
 # Modelni chaqirmasdan tekshirish uchun translate_sentences ni almashtiramiz
 import translator
 
-translator.translate_sentences = lambda sents, title="", glossary=None: {
+translator.translate_sentences = lambda sents, title="", glossary=None, context_of=None: {
     s["sid"]: "UZ " + s["text"] for s in sents
 }
 
@@ -267,7 +267,7 @@ from translator import translate_range_paired
 import translator as _t
 
 # Model chaqirilmasin: gap tarjimasi = "UZ " + gap matni
-_t.translate_sentences = lambda sents, title="", glossary=None: dict(
+_t.translate_sentences = lambda sents, title="", glossary=None, context_of=None: dict(
     (s["sid"], "UZ " + s["text"]) for s in sents
 )
 

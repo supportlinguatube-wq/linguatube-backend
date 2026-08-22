@@ -1189,13 +1189,26 @@ def _build_transcript_page(video_id: str, limit: int, offset: int):
     # Javob shakli AYNAN bir xil: har bir segment uchun bitta element,
     # o'sha index / start / duration bilan. Faqat `translated` sifatli bo'ladi.
     # Shuning uchun App Store'dagi ilovaga tegish KERAK EMAS.
-    if os.getenv("TRANSLATE_V2") in ("1", "true", "yes", "on"):
+    # TRANSLATE_PAIRED yoqilgan bo'lsa, TRANSLATE_V2 ni alohida yoqish SHART
+    # EMAS — paired baribir v2 quvurining bir qismi.
+    #
+    # NEGA: `/v2/subtitles` (routes_v2.py) faqat TRANSLATE_PAIRED ni o'qiydi,
+    # TRANSLATE_V2 ni umuman bilmaydi. Ilova esa bitta ekranda ikkalasidan
+    # subtitr yig'adi: birinchi ~40 segment SHU yerdan (/process -> /transcript),
+    # qolgani /v2/subtitles dan. Ikki qoida bir xil bo'lmasa, TRANSLATE_V2
+    # o'chirilgan holatda video BOSHI eski segment-tarjimon bilan chiqib,
+    # ingliz va o'zbek matni bir jumlaga siljigan ko'rinardi, qolgan qismi
+    # esa joyida bo'lardi. Endi ikkala endpoint bitta flagdan yuradi.
+    paired_on = os.getenv("TRANSLATE_PAIRED") in ("1", "true", "yes", "on")
+    v2_on = paired_on or os.getenv("TRANSLATE_V2") in ("1", "true", "yes", "on")
+
+    if v2_on:
         try:
-            # TRANSLATE_PAIRED=1 -> `text` va `translated` ikkisi ham to'liq gap
-            # bo'ladi, ya'ni ekranda ingliz va o'zbek matni DOIM mos keladi.
+            # paired -> `text` va `translated` ikkisi ham to'liq gap bo'ladi,
+            # ya'ni ekranda ingliz va o'zbek matni DOIM mos keladi.
             # O'chirilgan bo'lsa har segment alohida tarjima qilinadi (moslik
             # buzilishi mumkin, lekin `text` asl segment bo'lagi bo'lib qoladi).
-            if os.getenv("TRANSLATE_PAIRED") in ("1", "true", "yes", "on"):
+            if paired_on:
                 from translator import translate_range_paired
 
                 return translate_range_paired(
