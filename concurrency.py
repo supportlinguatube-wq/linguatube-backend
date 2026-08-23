@@ -70,12 +70,21 @@ def load_stats():
 
 
 @contextmanager
-def cold_slot():
-    """Og'ir ish uchun joy oladi. Joy bo'shamasa ServerBusy otadi."""
+def cold_slot(wait=None):
+    """
+    Og'ir ish uchun joy oladi. Joy bo'shamasa ServerBusy otadi.
+
+    `wait` — necha sekund kutish. Berilmasa ADMISSION_WAIT ishlatiladi.
+    Fon vazifalari (prefetch) uchun 0 beriladi: ular kutib turishi
+    shart emas, chunki ularni hech kim kutmayapti. Kutsa — bekorga
+    thread ushlab, haqiqiy so'rovlarga xalaqit beradi.
+    """
 
     started = time.time()
 
-    if not _cold_slots.acquire(timeout=ADMISSION_WAIT):
+    timeout = ADMISSION_WAIT if wait is None else wait
+
+    if not _cold_slots.acquire(timeout=timeout):
         _bump("busy")
         print("ADMISSION: navbat to'ldi, rad etildi (limit=%d)" % MAX_COLD)
         raise ServerBusy()

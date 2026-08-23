@@ -20,9 +20,11 @@ YECHIM: index pagination o'rniga VAQT OYNASI + keyingi oynalarni FONDA
 import asyncio
 import os
 
-from fastapi import APIRouter, BackgroundTasks, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from cache import get_cache, set_cache, TRANSLATION_TTL
+from concurrency import cold_slot, single_flight, work_pool, ServerBusy
+from redis_manager import redis_client
 from translator import (
     translate_transcript,
     translate_range,
@@ -99,6 +101,44 @@ def _index_range_for_time(items, from_time, window):
     return first, (last - first + 1)
 
 
+def _is_real_translation(cues):
+    """
+    Bu natija HAQIQATAN tarjima qilinganmi?
+
+    Nega kerak: model rad etsa (kunlik token limiti, 429, tarmoq uzilishi)
+    translator xato QAYTARMAYDI — `translated` maydoniga inglizcha matnning
+    O'ZINI qo'yadi (translator.py:573). Ilgari o'sha natija keshga tushardi
+    va 30 kun davomida HAMMA foydalanuvchi o'sha videoni tarjimasiz ko'rardi.
+    Bitta yuk cho'qqisi katalogni shu tarzda zaharlab ketishi mumkin edi.
+
+    Baholash faqat HAQIQIY GAPLAR bo'yicha: "[Music]" kabi qisqa teglar
+    tarjimasiz qolishi normal, ular hisobga olinmaydi.
+    """
+    if not cues:
+        return False
+
+    real = [
+        c for c in cues
+        if len((c.get("text") or "").split()) >= 3
+    ]
+
+    if not real:
+        # Baholaydigan gap yo'q (butun oyna musiqa/shovqin) — to'g'ri deymiz
+        return True
+
+    same = 0
+
+    for c in real:
+        text = (c.get("text") or "").strip()
+        uz = (c.get("translated") or "").strip()
+
+        if text and uz == text:
+            same += 1
+
+    # Yarmidan ko'pi tarjimasiz bo'lsa — bu tarjima emas, javob bermagan model
+    return same * 2 <= len(real)
+
+
 def _has_subtitles(items):
     if not items:
         return False
@@ -107,56 +147,122 @@ def _has_subtitles(items):
     return True
 
 
-def _translate_window(video_id, from_time, video_title="", mode="sentence"):
-    """Bitta oynani tarjima qiladi (kesh bilan). Sinxron — executor'da chaqiriladi."""
+def _translate_window(video_id, from_time, video_title="", mode="sentence",
+                      slot_wait=None):
+    """
+    Bitta oynani tarjima qiladi. Sinxron — executor'da chaqiriladi.
+
+    IKKI HIMOYA bilan o'ralgan (ilgari ikkalasi ham faqat /transcript da
+    bor edi, holbuki ilovalar aynan SHU yo'ldan yuradi):
+
+      single_flight — bir xil videoni bir vaqtda ochgan 30 kishidan
+                      faqat BITTASI tarjima qiladi, qolganlari tayyor
+                      natijani kutadi. Busiz reklama kuni bitta video
+                      olomon soniga ko'paytirilib tarjima qilinardi.
+
+      cold_slot     — bir vaqtda nechta og'ir ish ketishi cheklanadi.
+                      Busiz 100 so'rov 100 ta ish boshlab, thread'lar
+                      tugab, OpenAI 429 qaytarardi va HAMMA sekinlashardi.
+    """
     key = _window_key(video_id, from_time, mode)
 
     cached = get_cache(key)
+
     if cached is not None:
-        print("WINDOW FROM REDIS:", key)
-        return cached
 
-    fetch_transcript, _ = _deps()
-    items = fetch_transcript(video_id)
+        if _is_real_translation(cached):
+            print("WINDOW FROM REDIS:", key)
+            return cached
 
-    if not _has_subtitles(items):
-        return None
+        # Eski ZAHARLANGAN yozuv: limitga urilgan paytda tushgan tarjimasiz
+        # matn. O'chiramiz — aks holda 30 kun shu holicha berilaverardi.
+        print("WINDOW CACHE ZAHARLANGAN, qayta quriladi:", key)
 
-    # Vaqtni indeksga o'giramiz va /transcript ISHLATADIGAN AYNI funksiyani
-    # chaqiramiz. Ilgari bu yerda translate_transcript(mode="sentence")
-    # ishlatilardi — u paired rejimni bilmaydi va ingliz-o'zbek mosligini
-    # bermaydi. Ikkala endpoint bir xil natija berishi shart.
-    offset, count = _index_range_for_time(items, from_time, WINDOW)
+        try:
+            if redis_client is not None:
+                redis_client.delete(key)
+        except Exception as error:
+            print("CACHE DELETE ERROR:", error)
 
-    if offset is None:
-        return []
+    def produce():
 
-    if PAIRED_ON:
-        cues = translate_range_paired(
-            items, offset, count, video_title=video_title
-        )
-    else:
-        cues = translate_range_strict(
-            items, offset, count, video_title=video_title
-        )
+        with cold_slot(wait=slot_wait):
+
+            fetch_transcript, _ = _deps()
+            items = fetch_transcript(video_id)
+
+            if not _has_subtitles(items):
+                return None
+
+            # Vaqtni indeksga o'giramiz va /transcript ISHLATADIGAN AYNI
+            # funksiyani chaqiramiz — ikkala endpoint bir xil natija berishi
+            # shart.
+            offset, count = _index_range_for_time(items, from_time, WINDOW)
+
+            if offset is None:
+                return []
+
+            if PAIRED_ON:
+                return translate_range_paired(
+                    items, offset, count, video_title=video_title
+                )
+
+            return translate_range_strict(
+                items, offset, count, video_title=video_title
+            )
 
     # DIQQAT: `index` ATAYLAB qayta raqamlanmaydi.
     #
     # U segmentning ABSOLYUT indeksi bo'lib qoladi. Ilova bir necha oynani
     # birlashtirganda takrorlarni aynan shu bo'yicha filtrlaydi — qayta
     # raqamlasak, har oyna 0 dan boshlanib, birlashtirish buzilardi.
-
-    set_cache(key, cues, TRANSLATION_TTL)
-    return cues
+    #
+    # Keshlashni endi single_flight bajaradi va FAQAT haqiqiy tarjimani
+    # yozadi (`cacheable`).
+    return single_flight(
+        result_key=key,
+        ttl=TRANSLATION_TTL,
+        produce=produce,
+        cacheable=_is_real_translation,
+    )
 
 
 def _prefetch(video_id, from_time, video_title, mode):
     """Fon vazifasi: keyingi oynalarni oldindan tarjima qilib keshga qo'yadi."""
     for i in range(1, PREFETCH_AHEAD + 1):
         try:
-            _translate_window(video_id, from_time + WINDOW * i, video_title, mode)
+            # slot_wait=0 — joy bo'sh bo'lmasa DARHOL voz kechadi.
+            # Prefetch'ni hech kim kutmayapti; navbatda turib thread
+            # ushlasa, haqiqiy so'rovlarga xalaqit beradi.
+            _translate_window(
+                video_id, from_time + WINDOW * i, video_title, mode,
+                slot_wait=0,
+            )
+        except ServerBusy:
+            print("PREFETCH: server band, oldindan tarjima o'tkazib yuborildi")
+            break
         except Exception as error:
             print("PREFETCH ERROR:", error)
+
+
+def _busy():
+    """
+    "Server band" javobi — 503.
+
+    Nega `{"error": true}` EMAS: ilovalarda u "bu videoda subtitr yo'q"
+    degan xabarga bog'langan. Server band bo'lganda o'sha xabarni
+    ko'rsatish foydalanuvchini adashtiradi — video aybdor bo'lib chiqadi.
+
+    503 esa ikkala ilovada ham tabiiy ravishda QAYTA URINISHGA olib
+    keladi: Android istisno deb ushlaydi va 3 sekunddan keyin qayta
+    so'raydi, iOS javobni o'qiy olmay o'sha oynani yuklanmagan deb
+    qoldiradi. Ya'ni telefondagi ESKI versiyalar ham to'g'ri ishlaydi.
+    """
+    return HTTPException(
+        status_code=503,
+        detail="Server hozir band. Bir necha soniyadan keyin qayta urinib ko'ring.",
+        headers={"Retry-After": "5"},
+    )
 
 
 def _align(t):
@@ -194,10 +300,17 @@ async def v2_subtitles(
     from_time = _align(t)
 
     loop = asyncio.get_running_loop()
-    cues = await loop.run_in_executor(
-        None,
-        lambda: _translate_window(video_id, from_time, title, mode),
-    )
+
+    try:
+        # work_pool, `None` emas: standart executor min(32, cpu+4) thread
+        # beradi va single-flight kutuvchilari ham thread egallaydi.
+        cues = await loop.run_in_executor(
+            work_pool,
+            lambda: _translate_window(video_id, from_time, title, mode),
+        )
+
+    except ServerBusy:
+        raise _busy()
 
     if cues is None:
         return {
@@ -205,6 +318,13 @@ async def v2_subtitles(
             "message": "Bu videoda subtitr mavjud emas.",
             "subtitles": [],
         }
+
+    # Tarjima o'rniga inglizcha matn qaytmasin. Model rad etgan bo'lsa
+    # (kunlik limit, 429) foydalanuvchi tarjimasiz matnni "tarjima" deb
+    # ko'radi va daqiqasi ham yechiladi — bu eng yomon holat.
+    if cues and not _is_real_translation(cues):
+        print("WINDOW TARJIMASIZ QAYTDI:", video_id, from_time)
+        raise _busy()
 
     background.add_task(_prefetch, video_id, from_time, title, mode)
 
@@ -229,13 +349,19 @@ async def v2_process(
     _, get_video_url = _deps()
     loop = asyncio.get_running_loop()
 
-    video = await loop.run_in_executor(None, lambda: get_video_url(video_id))
+    video = await loop.run_in_executor(
+        work_pool, lambda: get_video_url(video_id))
+
     title = video.get("title", "") or ""
 
-    cues = await loop.run_in_executor(
-        None,
-        lambda: _translate_window(video_id, 0.0, title, mode),
-    )
+    try:
+        cues = await loop.run_in_executor(
+            work_pool,
+            lambda: _translate_window(video_id, 0.0, title, mode),
+        )
+
+    except ServerBusy:
+        raise _busy()
 
     if cues is None:
         return {
@@ -246,6 +372,10 @@ async def v2_process(
             "thumbnail": video.get("thumbnail", ""),
             "subtitles": [],
         }
+
+    if cues and not _is_real_translation(cues):
+        print("WINDOW TARJIMASIZ QAYTDI:", video_id, 0.0)
+        raise _busy()
 
     background.add_task(_prefetch, video_id, 0.0, title, mode)
 
