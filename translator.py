@@ -106,6 +106,44 @@ def _openai():
     return _client
 
 
+# Ba'zi modellar `temperature` ni umuman qabul qilmaydi va 400 qaytaradi:
+# "Only the default (1) value is supported". Ilgari bunday modelga
+# o'tilsa BUTUN quvur qulardi — har uchala chaqiruv joyi xato berardi va
+# foydalanuvchi tarjima o'rniga inglizcha matnni ko'rardi.
+#
+# Endi birinchi rad javobidan keyin parametr tashlanadi va shu jarayon
+# davomida boshqa yuborilmaydi. Model almashtirish shu bilan xavfsiz.
+_TEMPERATURE_OK = True
+
+
+def _chat(**kwargs):
+    """Modelga yagona chaqiruv nuqtasi — moslik farqlari shu yerda yopiladi."""
+    global _TEMPERATURE_OK
+
+    if not _TEMPERATURE_OK:
+        kwargs.pop("temperature", None)
+
+    try:
+        return _openai().chat.completions.create(**kwargs)
+
+    except Exception as error:
+
+        if "temperature" not in kwargs:
+            raise
+
+        text = str(error).lower()
+
+        if "temperature" not in text or "unsupported" not in text:
+            raise
+
+        print("MODEL: temperature qabul qilinmadi — parametrsiz qayta urinamiz")
+
+        _TEMPERATURE_OK = False
+        kwargs.pop("temperature", None)
+
+        return _openai().chat.completions.create(**kwargs)
+
+
 def _clean(text):
     if not isinstance(text, str):
         return ""
@@ -503,7 +541,7 @@ def _build_user_message(batch, context_text, video_title, glossary):
 
 def _call_model(batch, context_text, video_title, glossary):
     """Bitta so'rov. return: {sid: uz_text} — to'liq bo'lmasligi mumkin."""
-    response = _openai().chat.completions.create(
+    response = _chat(
         model=TRANSLATE_MODEL,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -1163,7 +1201,7 @@ def _split_call(words, video_title, glossary):
     plain = " ".join(words)
 
     try:
-        response = _openai().chat.completions.create(
+        response = _chat(
             model=TRANSLATE_MODEL,
             messages=[
                 {"role": "system", "content": SPLIT_SYSTEM},
@@ -1381,7 +1419,7 @@ def restore_punctuation(text):
         return cached
 
     try:
-        response = _openai().chat.completions.create(
+        response = _chat(
             model=TRANSLATE_MODEL,
             messages=[
                 {"role": "system", "content": PUNCT_SYSTEM},
