@@ -27,14 +27,17 @@ router = APIRouter(tags=["AI Voice / TTS"])
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
 
+TTS_PROMPT_VERSION = "v3_expressive_warmth"
+
 UZBEK_TTS_INSTRUCTIONS = (
-    "Speak in natural, fluent conversational Uzbek language with authentic native pronunciation. "
-    "Strict phonetic rules: "
-    "1. The letter 'q' (Q) must be pronounced distinctly as a deep uvular stop [q] (bo'g'izdan chiquvchi 'q'), never as Turkish or Russian 'k'. "
-    "2. The vowel 'i' in natural spoken Uzbek is relaxed, weak, and largely reduced/elided (nutqda 'i' harfi to'liq qattiq o'qilmaydi, 80 foizi yeyilib, qisqa [ɪ]/[ɨ] deb aytiladi), do not pronounce it as a tense, sharp, exaggerated Turkish 'i'. "
-    "3. Pronounce 'o‘' (o') and 'g‘' (g') accurately according to authentic Uzbek phonetics. "
-    "4. Do not speak with a Turkish accent or Turkish intonation. "
-    "5. Speak briskly, rhythmically, and dynamically to match natural video subtitle pacing without dragging words."
+    "Role & Style: You are a warm, charismatic, and emotionally expressive native Uzbek voice actor dubbing video narration. "
+    "Expressive Tone & Emotion: "
+    "- Warmth & Sincerity (Iliqlik va samimiylik): Deliver speech with a genuinely warm, friendly, and human tone that feels close and heartfelt. "
+    "- Excitement & Energy (Hayajon va qiziqish): Bring the narrative to life with dynamic emotional energy, excitement, and lively curiosity where appropriate. Never sound flat, dry, monotonous, or robotic. "
+    "- Dubbing Artistry: Use natural pitch modulations, vivid conversational inflections, and dramatic variety, acting out the meaning of each sentence naturally. "
+    "- Word Completeness (Hech bir so'z tushib qolmasin): Pronounce EVERY SINGLE word from the input completely, clearly, and distinctly. NEVER skip, drop, swallow, or truncate any word, prefix, or suffix. "
+    "- Authentic Uzbek Pronunciation: Speak in fluent standard Uzbek with natural native phonetics (pronounce 'q', 'o‘', 'g‘' naturally and smoothly). Avoid foreign Turkish or Russian accents. "
+    "- Pacing: Speak briskly and engagingly to fit natural video pacing without dragging or slurring."
 )
 
 openai_client = None
@@ -144,7 +147,7 @@ def speak(
     clean_speed = max(0.5, min(2.0, round(request.speed, 2)))
 
     # 4. Redis Keshi (MD5 hash orqali)
-    cache_raw = f"{clean_text}_{clean_voice}_{clean_speed}"
+    cache_raw = f"{TTS_PROMPT_VERSION}_{clean_text}_{clean_voice}_{clean_speed}"
     cache_key = f"tts:{hashlib.md5(cache_raw.encode('utf-8')).hexdigest()}"
 
     if redis_client is not None:
