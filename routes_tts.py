@@ -25,7 +25,14 @@ logger = logging.getLogger("linguatube.tts")
 router = APIRouter(tags=["AI Voice / TTS"])
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "tts-1")
+TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+
+UZBEK_TTS_INSTRUCTIONS = (
+    "Speak in fluent, natural, native Uzbek language with an authentic Uzbek accent. "
+    "Pronounce the Uzbek letter 'q' (Q) distinctly as a deep uvular stop [q], never as Turkish 'k'. "
+    "Pronounce 'o‘' (o') and 'g‘' (g') accurately according to authentic Uzbek phonetics. "
+    "Do not speak with a Turkish or foreign accent. Maintain clear, natural Uzbek intonation."
+)
 
 openai_client = None
 if OPENAI_API_KEY:
@@ -154,13 +161,17 @@ def speak(
         )
 
     try:
-        speech_resp = openai_client.audio.speech.create(
-            model=TTS_MODEL,
-            voice=clean_voice,
-            input=clean_text,
-            speed=clean_speed,
-            response_format="mp3"
-        )
+        create_kwargs = {
+            "model": TTS_MODEL,
+            "voice": clean_voice,
+            "input": clean_text,
+            "speed": clean_speed,
+            "response_format": "mp3"
+        }
+        if "gpt-4o" in TTS_MODEL or "mini" in TTS_MODEL:
+            create_kwargs["instructions"] = UZBEK_TTS_INSTRUCTIONS
+
+        speech_resp = openai_client.audio.speech.create(**create_kwargs)
 
         audio_bytes = speech_resp.content
 
