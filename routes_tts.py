@@ -44,7 +44,12 @@ if OPENAI_API_KEY:
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 ALLOWED_VOICES = {
-    "shimmer", "nova", "alloy", "echo", "fable", "onyx"
+    "madina", "sardor", "shimmer", "nova", "alloy", "echo", "fable", "onyx"
+}
+
+EDGE_VOICE_MAP = {
+    "madina": "uz-UZ-MadinaNeural",
+    "sardor": "uz-UZ-SardorNeural"
 }
 
 # 10 soat = 36000 sekund (admin/developer promo code orqali vaqt qo'shganda)
@@ -107,7 +112,7 @@ def check_tts_entitlement(uid: Optional[str]) -> bool:
 
 
 @router.post("/speak")
-def speak(
+async def speak(
     request: SpeakRequest,
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None)
@@ -141,7 +146,7 @@ def speak(
 
     clean_voice = request.voice.lower().strip()
     if clean_voice not in ALLOWED_VOICES:
-        clean_voice = "shimmer"
+        clean_voice = "madina"
 
     clean_speed = max(0.5, min(2.0, round(request.speed, 2)))
 
@@ -158,7 +163,31 @@ def speak(
         except Exception as error:
             logger.warning(f"TTS Redis read error: {error}")
 
-    # 5. OpenAI TTS orqali generatsiya qilish
+    # 5. Agar Madina yoki Sardor (Edge TTS — 100% BEPUL / 0$) tanlangan bo'lsa:
+    if clean_voice in EDGE_VOICE_MAP:
+        try:
+            import edge_tts
+            edge_voice_id = EDGE_VOICE_MAP[clean_voice]
+            pct = int(round((clean_speed - 1.0) * 100))
+            rate_str = f"+{pct}%" if pct >= 0 else f"{pct}%"
+            communicate = edge_tts.Communicate(clean_text, edge_voice_id, rate=rate_str)
+            audio_buf = bytearray()
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_buf.extend(chunk["data"])
+            audio_bytes = bytes(audio_buf)
+            if audio_bytes:
+                if redis_client is not None:
+                    try:
+                        b64_str = base64.b64encode(audio_bytes).decode("ascii")
+                        redis_client.setex(cache_key, TTS_CACHE_TTL, b64_str)
+                    except Exception as error:
+                        logger.warning(f"TTS Redis write error: {error}")
+                return Response(content=audio_bytes, media_type="audio/mpeg")
+        except Exception as error:
+            logger.error(f"Edge TTS xatosi ({clean_voice}): {error}. OpenAI bilan davom etiladi...")
+
+    # 6. OpenAI TTS orqali generatsiya qilish
     if not openai_client:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

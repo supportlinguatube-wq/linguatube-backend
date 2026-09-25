@@ -9,3 +9,4 @@ deep-translator
 requests
 redis[hiredis]
 firebase-admin
+edge-tts
