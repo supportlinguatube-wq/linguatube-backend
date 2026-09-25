@@ -28,10 +28,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
 
 UZBEK_TTS_INSTRUCTIONS = (
-    "Speak in fluent, natural, native Uzbek language with an authentic Uzbek accent. "
-    "Pronounce the Uzbek letter 'q' (Q) distinctly as a deep uvular stop [q], never as Turkish 'k'. "
-    "Pronounce 'o‘' (o') and 'g‘' (g') accurately according to authentic Uzbek phonetics. "
-    "Do not speak with a Turkish or foreign accent. Maintain clear, natural Uzbek intonation."
+    "Speak in natural, fluent conversational Uzbek language with authentic native pronunciation. "
+    "Strict phonetic rules: "
+    "1. The letter 'q' (Q) must be pronounced distinctly as a deep uvular stop [q] (bo'g'izdan chiquvchi 'q'), never as Turkish or Russian 'k'. "
+    "2. The vowel 'i' in natural spoken Uzbek is relaxed, weak, and largely reduced/elided (nutqda 'i' harfi to'liq qattiq o'qilmaydi, 80 foizi yeyilib, qisqa [ɪ]/[ɨ] deb aytiladi), do not pronounce it as a tense, sharp, exaggerated Turkish 'i'. "
+    "3. Pronounce 'o‘' (o') and 'g‘' (g') accurately according to authentic Uzbek phonetics. "
+    "4. Do not speak with a Turkish accent or Turkish intonation. "
+    "5. Speak briskly, rhythmically, and dynamically to match natural video subtitle pacing without dragging words."
 )
 
 openai_client = None
