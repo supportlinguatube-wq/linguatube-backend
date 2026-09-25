@@ -25,7 +25,7 @@ logger = logging.getLogger("linguatube.tts")
 router = APIRouter(tags=["AI Voice / TTS"])
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "tts-1")
 
 TTS_PROMPT_VERSION = "v4_sokin_va_vazmin"
 
@@ -64,33 +64,33 @@ class SpeakRequest(BaseModel):
 def check_tts_entitlement(uid: Optional[str]) -> bool:
     """
     Foydalanuvchining AI Ovozdan foydalanish huquqini tekshiradi:
-    1. Vaqt xarid qilgan (hasPurchasedTime == True)
-    2. Yoki Booster kursi ochilgan (isBoosterUnlocked == True)
-    3. Yoki hisobida 10 soatdan ko'p vaqti bor (remainingSeconds >= 36000)
-       (Admin/developer promo code orqali o'ziga vaqt qo'shganda).
-
-    5 daqiqalik bepul foydalanuvchilar uchun False qaytaradi.
+    Hamma foydalanuvchilar (shu jumladan yangi 5 daqiqalik bepul sinovdagilar) uchun
+    Edge TTS (Madina / Sardor) ruxsat beriladi.
+    Faqat hisobida vaqti tugagan (0 bo'lgan) foydalanuvchilar cheklanadi.
     """
     if not uid:
-        return False
+        # Bepul sinov yoki anonim foydalanuvchilar uchun ruxsat
+        return True
 
     app = _firebase()
     if app is None:
-        # Dev rejim: agar FIREBASE_SERVICE_ACCOUNT_JSON bo'lmasa,
-        # faqat maxsus DEV_ALLOW_TTS=1 bo'lsagina ruxsat beriladi (default xavfsiz: False)
-        return os.getenv("DEV_ALLOW_TTS") in ("1", "true", "yes", "on")
+        return True
 
     try:
         from firebase_admin import firestore
 
         doc = firestore.client().collection("users").document(uid).get()
         if not doc.exists:
-            return False
+            # Yangi foydalanuvchi — 5 daqiqalik sinov huquqi bor
+            return True
 
         data = doc.to_dict() or {}
         has_purchased = data.get("hasPurchasedTime", False) is True
         is_booster = data.get("isBoosterUnlocked", False) is True
-        remaining_seconds = data.get("remainingSeconds") or 0
+        remaining_seconds = data.get("remainingSeconds")
+
+        if remaining_seconds is None:
+            return True
 
         try:
             remaining_seconds = int(remaining_seconds)
@@ -100,15 +100,15 @@ def check_tts_entitlement(uid: Optional[str]) -> bool:
         # Ruxsat berish shartlari:
         # - Pul to'lab xarid qilgan
         # - Yoki Booster kursi xarid qilingan
-        # - Yoki 10 soatdan ko'p vaqt mavjud (admin promo code)
-        if has_purchased or is_booster or (remaining_seconds >= ADMIN_PROMO_THRESHOLD_SECONDS):
+        # - Yoki hisobida hali vaqti qolgan bo'lsa (remaining_seconds > 0)
+        if has_purchased or is_booster or (remaining_seconds > 0):
             return True
 
         return False
 
     except Exception as error:
         logger.error(f"TTS entitlement check error for uid={uid}: {error}")
-        return False
+        return True
 
 
 @router.post("/speak")
@@ -188,42 +188,49 @@ async def speak(
             logger.error(f"Edge TTS xatosi ({clean_voice}): {error}. OpenAI bilan davom etiladi...")
 
     # 6. OpenAI TTS orqali generatsiya qilish
-    if not openai_client:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="OPENAI_API_KEY is not configured on server."
-        )
+    audio_bytes = None
+    if openai_client:
+        try:
+            model_to_use = "tts-1" if TTS_MODEL not in ("tts-1", "tts-1-hd") else TTS_MODEL
+            speech_resp = openai_client.audio.speech.create(
+                model=model_to_use,
+                voice=clean_voice if clean_voice in {"alloy", "echo", "fable", "onyx", "nova", "shimmer"} else "shimmer",
+                input=clean_text,
+                speed=clean_speed,
+                response_format="mp3"
+            )
+            audio_bytes = speech_resp.content
+        except Exception as error:
+            logger.error(f"OpenAI TTS API xatosi ({clean_voice}): {error}. Edge TTS zaxirasiga o'tiladi...")
 
-    try:
-        create_kwargs = {
-            "model": TTS_MODEL,
-            "voice": clean_voice,
-            "input": clean_text,
-            "speed": clean_speed,
-            "response_format": "mp3"
-        }
-        if "gpt-4o" in TTS_MODEL or "mini" in TTS_MODEL:
-            create_kwargs["instructions"] = UZBEK_TTS_INSTRUCTIONS
+    # 7. Agar OpenAI ishlamasa yoki bo'sh bo'lsa -> Edge TTS (Madina) zaxirasi
+    if not audio_bytes:
+        try:
+            import edge_tts
+            fallback_voice = "uz-UZ-MadinaNeural"
+            pct = int(round((clean_speed - 1.0) * 100))
+            rate_str = f"+{pct}%" if pct >= 0 else f"{pct}%"
+            communicate = edge_tts.Communicate(clean_text, fallback_voice, rate=rate_str)
+            audio_buf = bytearray()
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_buf.extend(chunk["data"])
+            audio_bytes = bytes(audio_buf)
+        except Exception as error:
+            logger.error(f"Edge TTS fallback xatosi: {error}")
 
-        speech_resp = openai_client.audio.speech.create(**create_kwargs)
-
-        audio_bytes = speech_resp.content
-
-        # 6. Redis'ga yozish
-        if redis_client is not None:
-            try:
-                b64_str = base64.b64encode(audio_bytes).decode("ascii")
-                redis_client.setex(cache_key, TTS_CACHE_TTL, b64_str)
-            except Exception as error:
-                logger.warning(f"TTS Redis write error: {error}")
-
-        return Response(content=audio_bytes, media_type="audio/mpeg")
-
-    except HTTPException:
-        raise
-    except Exception as error:
-        logger.error(f"OpenAI TTS API xatosi: {error}", exc_info=True)
+    if not audio_bytes:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"TTS generation error: {str(error)}"
+            detail="Ovoz generatsiya qilib bo'lmadi"
         )
+
+    # 8. Redis'ga yozish
+    if redis_client is not None:
+        try:
+            b64_str = base64.b64encode(audio_bytes).decode("ascii")
+            redis_client.setex(cache_key, TTS_CACHE_TTL, b64_str)
+        except Exception as error:
+            logger.warning(f"TTS Redis write error: {error}")
+
+    return Response(content=audio_bytes, media_type="audio/mpeg")
