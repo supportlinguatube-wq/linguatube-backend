@@ -1421,5 +1421,7 @@ def translate_word(
 #
 # Muammo chiqsa — pastdagi ikki qatorni izohga olib qo'ying, tamom.
 from routes_v2 import router as v2_router
+from routes_tts import router as tts_router
 
 app.include_router(v2_router)
+app.include_router(tts_router)
