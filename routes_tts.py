@@ -32,8 +32,7 @@ if OPENAI_API_KEY:
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 ALLOWED_VOICES = {
-    "shimmer", "nova", "alloy", "echo", "fable", "onyx",
-    "sage", "coral", "ash", "ballad", "verse", "marin", "cedar"
+    "shimmer", "nova", "alloy", "echo", "fable", "onyx"
 }
 
 # 10 soat = 36000 sekund (admin/developer promo code orqali vaqt qo'shganda)
