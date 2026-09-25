@@ -27,17 +27,16 @@ router = APIRouter(tags=["AI Voice / TTS"])
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
 
-TTS_PROMPT_VERSION = "v3_expressive_warmth"
+TTS_PROMPT_VERSION = "v4_sokin_va_vazmin"
 
 UZBEK_TTS_INSTRUCTIONS = (
-    "Role & Style: You are a warm, charismatic, and emotionally expressive native Uzbek voice actor dubbing video narration. "
-    "Expressive Tone & Emotion: "
-    "- Warmth & Sincerity (Iliqlik va samimiylik): Deliver speech with a genuinely warm, friendly, and human tone that feels close and heartfelt. "
-    "- Excitement & Energy (Hayajon va qiziqish): Bring the narrative to life with dynamic emotional energy, excitement, and lively curiosity where appropriate. Never sound flat, dry, monotonous, or robotic. "
-    "- Dubbing Artistry: Use natural pitch modulations, vivid conversational inflections, and dramatic variety, acting out the meaning of each sentence naturally. "
-    "- Word Completeness (Hech bir so'z tushib qolmasin): Pronounce EVERY SINGLE word from the input completely, clearly, and distinctly. NEVER skip, drop, swallow, or truncate any word, prefix, or suffix. "
-    "- Authentic Uzbek Pronunciation: Speak in fluent standard Uzbek with natural native phonetics (pronounce 'q', 'o‘', 'g‘' naturally and smoothly). Avoid foreign Turkish or Russian accents. "
-    "- Pacing: Speak briskly and engagingly to fit natural video pacing without dragging or slurring."
+    "Role: You are a calm, gentle, and composed native Uzbek narrator (bosiq, sokin va samimiy o'zbek suxandoni). "
+    "Tone & Pacing: "
+    "- Sokinlik va Bosiqlik (Calm & Soothing): Speak in a calm, relaxed, peaceful, and pleasant voice. Never sound rushed, frantic, loud, agitated, or theatrical. "
+    "- Samimiy va Mayin (Warm & Gentle): Maintain a warm, friendly, natural conversational tone, like a calm educational documentary or warm audiobook narrator. "
+    "- Aniq va Ravon (Articulate & Clear): Pronounce every single word completely, distinctly, and cleanly at an unhurried, natural speaking pace. "
+    "- Word Completeness: Read every single word in full. Never omit or swallow words. "
+    "- Authentic Uzbek: Speak in pure standard Uzbek with natural phonetics (natural 'q', 'o‘', 'g‘'). Avoid Turkish, Russian, or robotic intonation."
 )
 
 openai_client = None
