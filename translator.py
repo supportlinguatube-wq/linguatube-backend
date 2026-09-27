@@ -64,6 +64,26 @@ TRANSLATE_MODEL = os.getenv("TRANSLATE_MODEL", "gpt-4.1")
 BATCH_SIZE = int(os.getenv("TRANSLATE_BATCH_SIZE", "28"))
 MAX_WORKERS = int(os.getenv("TRANSLATE_WORKERS", "4"))      # parallel batch
 CONTEXT_LOOKBACK = 2        # oldingi nechta gap kontekst uchun beriladi
+
+# ================================================================
+# FAST START & PARALLEL BATCHING
+# ================================================================
+# FAST_START=1 (default) -> Bitta batchda 28 ta gapni 18 soniya ketma-ket
+# generatsiya qilish o'rniga, MAX_WORKERS parallel thread'larida 8-10 tadan
+# bir vaqtda tarjima qiladi (vaqt 18s -> 4-6s ga tushadi). Sifat va prompt bir xil.
+# FAST_START=0 -> Eski BATCH_SIZE (28) ga 100% qaytadi (1 soniyada orqaga qaytarish).
+FAST_START = os.getenv("FAST_START", "1") not in ("0", "false", "no", "off")
+FAST_START_BATCH_SIZE = int(os.getenv("FAST_START_BATCH_SIZE", "10"))
+
+
+def _effective_batch_size(todo_count):
+    if not FAST_START:
+        return BATCH_SIZE
+    if todo_count <= FAST_START_BATCH_SIZE:
+        return todo_count
+    # MAX_WORKERS parallel thread'laridan to'liq foydalanish
+    workers = min(MAX_WORKERS, max(1, (todo_count + FAST_START_BATCH_SIZE - 1) // FAST_START_BATCH_SIZE))
+    return max(5, (todo_count + workers - 1) // workers)
 # AUTO-CAPTION'DA PUNKTUATSIYA YO'Q.
 # "morning ted", "good morning jim how are you" — nuqta umuman bo'lmaydi,
 # shuning uchun faqat punktuatsiyaga tayanib bo'lmaydi: gap yopilmasdan
@@ -638,7 +658,8 @@ def translate_sentences(sentences, video_title="", glossary=None,
         print("TRANSLATION: %d/%d keshdan" % (len(translations), len(sentences)))
         return translations
 
-    batches = [todo[i:i + BATCH_SIZE] for i in range(0, len(todo), BATCH_SIZE)]
+    bs = _effective_batch_size(len(todo))
+    batches = [todo[i:i + bs] for i in range(0, len(todo), bs)]
 
     text_by_sid = dict(
         (x["sid"], x["text"]) for x in (context_of or sentences)
@@ -897,7 +918,8 @@ def translate_segments(items, video_title="", glossary=None):
 
     # Batch uchun "sid" = segmentning absolyut indeksi
     units = [{"sid": it["index"], "text": it["text"]} for it in todo]
-    batches = [units[i:i + BATCH_SIZE] for i in range(0, len(units), BATCH_SIZE)]
+    bs = _effective_batch_size(len(units))
+    batches = [units[i:i + bs] for i in range(0, len(units), bs)]
 
     # Kontekst uchun indeksdan matnga tezkor xarita
     text_by_index = dict((it["index"], it["text"]) for it in normalized)
