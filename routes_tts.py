@@ -28,7 +28,22 @@ router = APIRouter(tags=["AI Voice / TTS"])
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "tts-1")
 
-TTS_PROMPT_VERSION = "v5_clean_phonetics"
+TTS_PROMPT_VERSION = "v6_silence_buffer"
+
+def add_lead_in_silence_to_mp3(audio_bytes: bytes, num_silent_frames: int = 7) -> bytes:
+    """
+    MP3 boshiga ~168ms (7 ta kadr * 24ms) haqiqiy raqamli sukunat (silence) qo'shadi.
+    Bu orqali mobil ilovalar (iOS va Android) audio pleyer boshlanayotganda yoki
+    YouTube ovozini ducking qilayotganda gapning birinchi so'zini yeb yubormaydi!
+    """
+    if not audio_bytes or len(audio_bytes) < 144:
+        return audio_bytes
+    if audio_bytes[:2] == b"\xff\xf3" and (audio_bytes[2] & 0xfe) == 0x64:
+        silent_frame = bytes([
+            0xff, 0xf3, 0x64, 0xc4, 0x7c, 0x00, 0x00, 0x03, 0x48, 0x00, 0x00, 0x00, 0x00
+        ] + [0x55] * 131)
+        return audio_bytes[:144] + (silent_frame * num_silent_frames) + audio_bytes[144:]
+    return audio_bytes
 
 # --- O'zbek tili uchun fonetik va raqamlar normalizatori ---
 ONES_UZ = {
@@ -266,6 +281,8 @@ async def speak(
                     audio_buf.extend(chunk["data"])
             audio_bytes = bytes(audio_buf)
             if audio_bytes:
+                # Birinchi so'z yeb ketilmasligi uchun audio boshiga 168ms haqiqiy sukunat qo'shamiz
+                audio_bytes = add_lead_in_silence_to_mp3(audio_bytes)
                 if redis_client is not None:
                     try:
                         b64_str = base64.b64encode(audio_bytes).decode("ascii")
@@ -289,6 +306,8 @@ async def speak(
                 response_format="mp3"
             )
             audio_bytes = speech_resp.content
+            if audio_bytes:
+                audio_bytes = add_lead_in_silence_to_mp3(audio_bytes)
         except Exception as error:
             logger.error(f"OpenAI TTS API xatosi ({clean_voice}): {error}. Edge TTS zaxirasiga o'tiladi...")
 
@@ -305,6 +324,8 @@ async def speak(
                 if chunk["type"] == "audio":
                     audio_buf.extend(chunk["data"])
             audio_bytes = bytes(audio_buf)
+            if audio_bytes:
+                audio_bytes = add_lead_in_silence_to_mp3(audio_bytes)
         except Exception as error:
             logger.error(f"Edge TTS fallback xatosi: {error}")
 
