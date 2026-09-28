@@ -96,5 +96,28 @@ print("OK  flag o'chiq -> javob bugungisidan farq qilmaydi")
 
 expressions.ENABLED = True
 
+# ---- 9) Shakllar avtomatik yasalsinmi ----
+from expressions import _expand
+
+# `forms` berilmagan: fe'l shakllari o'zi yasaladi
+auto = _expand({"lemma": "figure out", "uz": "x"})
+for want in ("figure out", "figures out", "figured out", "figuring out"):
+    assert want in auto, "%r yasalmadi: %s" % (want, auto)
+
+# oxiri 'e': make -> making (e tushadi), made emas (u noto'g'ri fe'l)
+auto = _expand({"lemma": "come across", "uz": "x", "extra": ["came across"]})
+assert "coming across" in auto, auto
+assert "came across" in auto, "extra qo'shilmadi: %s" % (auto,)
+
+# CVC ikkilanishi: stop -> stopping
+auto = _expand({"lemma": "stop by", "uz": "x"})
+assert "stopping by" in auto, auto
+
+# `forms` berilgan bo'lsa aynan o'shalar, yasash YO'Q
+fixed = _expand({"lemma": "a lot of", "uz": "x", "forms": ["a lot of"]})
+assert fixed == ["a lot of"], fixed
+
+print("OK  shakllar avtomatik yasaladi, `forms` berilsa ustunlik qiladi")
+
 print("\n" + "=" * 50)
 print("IBORALAR MODULI: BARCHA TESTLAR O'TDI")

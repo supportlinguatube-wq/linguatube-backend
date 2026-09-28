@@ -46,6 +46,93 @@ _INDEX = None
 _CYRILLIC = re.compile(u"[Ѐ-ӿ]")
 
 
+_VOWELS = "aeiou"
+_ES_END = ("s", "x", "z", "ch", "sh", "o")
+
+
+def _is_cvc(word):
+    """undosh-unli-undosh — oxirgi harf ikkilanadi (stop -> stopping)"""
+    if len(word) < 3:
+        return False
+    a, b, c = word[-3], word[-2], word[-1]
+    return (
+        a not in _VOWELS
+        and b in _VOWELS
+        and c not in _VOWELS
+        and c not in "wxy"
+    )
+
+
+def _verb_forms(verb):
+    """
+    Fe'lning ODATDAGI shakllari: -s, -ed, -ing.
+
+    Nega kerak: har bir iborani qo'lda to'rt marta yozish zerikarli va
+    xatoga olib keladi. Endi `lemma` va `uz` yozish kifoya.
+
+    Noto'g'ri fe'llar (gave, given, took...) avtomatik chiqmaydi —
+    ular `extra` maydonida ko'rsatiladi.
+    """
+    forms = {verb}
+
+    # -s
+    if verb.endswith("y") and len(verb) > 1 and verb[-2] not in _VOWELS:
+        forms.add(verb[:-1] + "ies")
+    elif verb.endswith(_ES_END):
+        forms.add(verb + "es")
+    else:
+        forms.add(verb + "s")
+
+    # -ing / -ed
+    if verb.endswith("e") and not verb.endswith("ee"):
+        forms.add(verb[:-1] + "ing")
+        forms.add(verb + "d")
+    elif verb.endswith("y") and len(verb) > 1 and verb[-2] not in _VOWELS:
+        forms.add(verb + "ing")
+        forms.add(verb[:-1] + "ied")
+    elif _is_cvc(verb):
+        forms.add(verb + verb[-1] + "ing")
+        forms.add(verb + verb[-1] + "ed")
+    else:
+        forms.add(verb + "ing")
+        forms.add(verb + "ed")
+
+    return forms
+
+
+def _expand(entry):
+    """
+    Yozuvdan qidiriladigan shakllar ro'yxati.
+
+    `forms` ochiq berilgan bo'lsa — aynan o'shalar (to'liq nazorat, fe'l
+    bo'lmagan iboralar uchun: "a lot of", "by the way").
+
+    Berilmagan bo'lsa — birinchi so'z fe'l deb hisoblanib shakllari
+    yasaladi, `extra` dagilar ustiga qo'shiladi.
+    """
+    if entry.get("forms"):
+        return entry["forms"]
+
+    lemma = (entry.get("lemma") or "").strip()
+
+    if not lemma:
+        return []
+
+    parts = lemma.split()
+    head = parts[0]
+    tail = " ".join(parts[1:])
+
+    out = set()
+
+    for form in _verb_forms(head):
+        out.add((form + " " + tail).strip())
+
+    for extra in entry.get("extra", []):
+        out.add(extra.strip())
+
+    return sorted(out)
+
+
 def _load():
     """Lug'atlarni bir marta o'qiydi. Fayl yo'q bo'lsa modul jim o'chadi."""
     global _INDEX
@@ -72,9 +159,7 @@ def _load():
 
         for entry in entries:
 
-            forms = entry.get("forms") or [entry.get("lemma", "")]
-
-            for form in forms:
+            for form in _expand(entry):
                 form = form.strip().lower()
                 if form:
                     pairs.append((form, entry))

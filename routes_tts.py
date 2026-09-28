@@ -9,6 +9,7 @@ routes_tts.py — O'zbekcha AI Ovoz (OpenAI TTS) endpointi
 """
 
 import os
+import re
 import hashlib
 import base64
 import logging
@@ -27,7 +28,95 @@ router = APIRouter(tags=["AI Voice / TTS"])
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "tts-1")
 
-TTS_PROMPT_VERSION = "v4_sokin_va_vazmin"
+TTS_PROMPT_VERSION = "v5_clean_phonetics"
+
+# --- O'zbek tili uchun fonetik va raqamlar normalizatori ---
+ONES_UZ = {
+    0: "nol", 1: "bir", 2: "ikki", 3: "uch", 4: "toʻrt", 5: "besh",
+    6: "olti", 7: "yetti", 8: "sakkiz", 9: "toʻqqiz"
+}
+TENS_UZ = {
+    10: "oʻn", 20: "yigirma", 30: "oʻttiz", 40: "qirq", 50: "ellik",
+    60: "oltmish", 70: "yetmish", 80: "sakson", 90: "toʻqson"
+}
+
+def int_to_uzbek(n: int) -> str:
+    if n == 0:
+        return "nol"
+    if n < 0:
+        return "minus " + int_to_uzbek(-n)
+    parts = []
+    if n >= 1_000_000_000:
+        b = n // 1_000_000_000
+        n %= 1_000_000_000
+        parts.append(int_to_uzbek(b) + " milliard")
+    if n >= 1_000_000:
+        m = n // 1_000_000
+        n %= 1_000_000
+        parts.append(int_to_uzbek(m) + " million")
+    if n >= 1000:
+        t = n // 1000
+        n %= 1000
+        parts.append((int_to_uzbek(t) if t > 1 else "bir") + " ming")
+    if n >= 100:
+        h = n // 100
+        n %= 100
+        parts.append((ONES_UZ[h] if h > 1 else "") + " yuz")
+    if n >= 10:
+        ten = (n // 10) * 10
+        n %= 10
+        parts.append(TENS_UZ[ten])
+    if n > 0:
+        parts.append(ONES_UZ[n])
+    return " ".join([p for p in parts if p.strip()])
+
+def ordinal_suffix(word: str) -> str:
+    w = word.strip()
+    if w.endswith("i") or w.endswith("a"):
+        return w + "nchi"
+    return w + "inchi"
+
+def clean_uzbek_text_for_tts(text: str) -> str:
+    """
+    TTS modellari (Edge TTS va OpenAI) o'zbekcha matnni xatosiz va tabiiy o'qishi uchun:
+    1. Raqamlar (3000 -> uch ming) o'zbek so'zlariga aylantiriladi ('3 oh oh oh' muammosi hal bo'ladi).
+    2. Oʻ va Gʻ harflaridagi har xil belgilar (’, ‘, ', `, ʼ) rasmiy o'zbek \\u02bb harfiga keltiriladi ('o' deb o'qish yo'qoladi).
+    3. Gap boshidagi kesilishlarning oldini olish uchun tabiiy mikropauza qo'yiladi.
+    """
+    if not text:
+        return ""
+    t = text
+
+    # 1. Standartlashtirish: Oʻ va Gʻ harflaridagi har xil apostroflarni (’, ‘, ', `, ʼ)
+    # rasmiy oʻzbek lotin oʻzgartiruvchi belgisi \u02bb ga aylantiramiz
+    t = re.sub(r"[oO][\u2019\u2018\x27\x60\u02bc\u02bb]", lambda m: "Oʻ" if m.group(0)[0] == "O" else "oʻ", t)
+    t = re.sub(r"[gG][\u2019\u2018\x27\x60\u02bc\u02bb]", lambda m: "Gʻ" if m.group(0)[0] == "G" else "gʻ", t)
+
+    # Standart so'z ichidagi tutuq belgisi (masalan: ma'lumot, ta'lim, e'tibor)
+    t = re.sub(r"([a-zA-Z])[\u2019\u2018\x60\u02bc]([a-zA-Z])", r"\1'\2", t)
+
+    # 2. Foizlar (%50 yoki 50%)
+    t = re.sub(r"%\s*(\d+)", lambda m: int_to_uzbek(int(m.group(1))) + " foiz", t)
+    t = re.sub(r"(\d+)\s*%", lambda m: int_to_uzbek(int(m.group(1))) + " foiz", t)
+
+    # 3. Valyutalar ($100 yoki 100$)
+    t = re.sub(r"\$\s*(\d+)", lambda m: int_to_uzbek(int(m.group(1))) + " dollar", t)
+    t = re.sub(r"(\d+)\s*\$", lambda m: int_to_uzbek(int(m.group(1))) + " dollar", t)
+
+    # 4. Oʻnlik kasrlar: 3.5 yoki 3,5
+    t = re.sub(r"(\d+)[.,](\d+)", lambda m: int_to_uzbek(int(m.group(1))) + " butun " + int_to_uzbek(int(m.group(2))), t)
+
+    # 5. Tartib sonlar: 1-oʻrin, 2-chi, 3000-
+    t = re.sub(r"(\d+)-(?:chi|inchi)?\b", lambda m: ordinal_suffix(int_to_uzbek(int(m.group(1)))) + " ", t)
+
+    # 6. Oddiy butun sonlar: 3000 -> uch ming
+    t = re.sub(r"\b\d+\b", lambda m: int_to_uzbek(int(m.group(0))), t)
+
+    # 7. Ortiqcha belgilarni tozalash (emoji, maxsus belgilar)
+    t = re.sub(r"[\r\n\t]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    return t
 
 UZBEK_TTS_INSTRUCTIONS = (
     "Role: You are a calm, gentle, and composed native Uzbek narrator (bosiq, sokin va samimiy o'zbek suxandoni). "
@@ -137,7 +226,7 @@ async def speak(
         )
 
     # 3. Parametrlarni tozalash va tekshirish
-    clean_text = request.text.strip()
+    clean_text = clean_uzbek_text_for_tts(request.text.strip())
     if not clean_text:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
